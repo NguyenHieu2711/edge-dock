@@ -61,7 +61,9 @@ object AppLauncherEngine {
         }
 
         val shizukuReady = ShizukuBridge.isReadyCached
-        val hideRecents = DockPrefs.isHideFromRecents(context)
+        // IMPORTANT: FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS prevents Android from matching & resuming existing
+        // background tasks (causing reload every reopen), so never apply it when keepAlive=true!
+        val applyExcludeRecents = DockPrefs.isHideFromRecents(context) && !entry.keepAlive
 
         DockSessionTracker.startSession(
             dockPkg = entry.packageName,
@@ -77,18 +79,18 @@ object AppLauncherEngine {
                 context = context,
                 packageName = entry.packageName,
                 knownTaskId = knownTid,
-                excludeFromRecents = hideRecents
+                excludeFromRecents = false
             ) { resumed, resolvedTid ->
                 if (resumed) {
                     if (resolvedTid > 0) DockSessionTracker.rememberDockTaskId(entry.packageName, resolvedTid)
                 } else {
-                    launchColdAndTrackTask(context, entry.packageName, launchIntent, hideRecents)
+                    launchColdAndTrackTask(context, entry.packageName, launchIntent, false)
                 }
             }
             return
         }
 
-        launchColdAndTrackTask(context, entry.packageName, launchIntent, hideRecents)
+        launchColdAndTrackTask(context, entry.packageName, launchIntent, applyExcludeRecents)
     }
 
     private fun launchColdAndTrackTask(

@@ -305,7 +305,7 @@ class MainActivity : AppCompatActivity() {
             setPadding(dp(14f), dp(8f), dp(14f), dp(12f))
         }
 
-        addToggleRow(cfgCard, "Ẩn khỏi Đa nhiệm", DockPrefs.isHideFromRecents(this)) { on ->
+        addToggleRow(cfgCard, "Ẩn khỏi Đa nhiệm (chỉ app tắt ngầm)", DockPrefs.isHideFromRecents(this)) { on ->
             DockPrefs.setHideFromRecents(this, on)
         }
         addDivider(cfgCard)

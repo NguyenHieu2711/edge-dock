@@ -42,7 +42,7 @@ object DockPrefs {
     fun setHandleHeightDp(ctx: Context, dp: Int) =
         prefs(ctx).edit().putInt(KEY_HANDLE_HEIGHT_DP, dp.coerceIn(56, 160)).apply()
 
-    fun isHideFromRecents(ctx: Context): Boolean = prefs(ctx).getBoolean(KEY_HIDE_RECENTS, true)
+    fun isHideFromRecents(ctx: Context): Boolean = prefs(ctx).getBoolean(KEY_HIDE_RECENTS, false)
     fun setHideFromRecents(ctx: Context, hide: Boolean) =
         prefs(ctx).edit().putBoolean(KEY_HIDE_RECENTS, hide).apply()
 
