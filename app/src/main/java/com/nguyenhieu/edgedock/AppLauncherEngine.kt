@@ -74,9 +74,8 @@ object AppLauncherEngine {
             inPopupMode = wantPopup
         )
 
-        // FAST-PATH (0-RELOAD RESUME!): If Shizuku is ready and app is kept alive in RAM,
-        // resume its exact existing taskId via IActivityTaskManager.moveTaskToFront instead of cold startActivity!
-        if (shizukuReady && entry.keepAlive && !wantPopup) {
+        // FAST-PATH (0-RELOAD RESUME!): Always bring existing RAM taskId to front first when keepAlive is ON!
+        if (shizukuReady && entry.keepAlive) {
             val knownTid = DockSessionTracker.getKnownDockTaskId(entry.packageName)
             ShizukuBridge.resumeExistingPackageTaskAsync(
                 context = context,
@@ -87,8 +86,7 @@ object AppLauncherEngine {
                 if (resumed) {
                     if (resolvedTid > 0) DockSessionTracker.rememberDockTaskId(entry.packageName, resolvedTid)
                 } else {
-                    // Cold launch first time (not in RAM yet), then capture its taskId for instant future resumes!
-                    launchColdAndTrackTask(context, entry.packageName, launchIntent, hideRecents, wantPopup = false)
+                    launchColdAndTrackTask(context, entry.packageName, launchIntent, hideRecents, wantPopup)
                 }
             }
             return
@@ -153,6 +151,7 @@ object AppLauncherEngine {
         val returnPkg = DockSessionTracker.returnTargetPackage
         val returnTid = DockSessionTracker.returnTargetTaskId
         val wasHome = DockSessionTracker.returnWasHome
+        val wasPopup = DockSessionTracker.openedInPopupMode
 
         DockSessionTracker.clearSession()
 
@@ -160,6 +159,15 @@ object AppLauncherEngine {
         val keepAlive = entry?.keepAlive ?: true
         val hideRecents = DockPrefs.isHideFromRecents(context)
         val shizukuReady = ShizukuBridge.isReadyCached
+
+        // If user enabled Pop-up mode, normalize the dock task to Fullscreen behind YouTube
+        // so Samsung One UI NEVER leaves a minimized floating icon bubble on screen!
+        if (wasPopup && shizukuReady && !dockPkg.isNullOrBlank()) {
+            val dockTid = DockSessionTracker.getKnownDockTaskId(dockPkg)
+            if (dockTid > 0 && keepAlive) {
+                ShizukuBridge.setTaskFullscreenAsync(context, dockTid)
+            }
+        }
 
         val afterRestore: () -> Unit = {
             if (!dockPkg.isNullOrBlank() && shizukuReady) {

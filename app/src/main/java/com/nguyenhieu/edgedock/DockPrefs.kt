@@ -17,7 +17,7 @@ object DockPrefs {
     private const val KEY_HANDLE_Y_PCT = "handle_y_pct"
     private const val KEY_HANDLE_ALPHA_PCT = "handle_alpha_pct"
     private const val KEY_HANDLE_HEIGHT_DP = "handle_height_dp"
-    private const val KEY_POPUP_MODE = "launch_popup_mode"
+    private const val KEY_POPUP_MODE = "launch_popup_mode_v2"
     private const val KEY_HIDE_RECENTS = "hide_from_recents"
     private const val KEY_APPS_JSON = "dock_apps_json"
 

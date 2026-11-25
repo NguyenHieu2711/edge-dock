@@ -168,7 +168,7 @@ object ShizukuBridge {
     private fun buildServiceArgs(context: Context): Shizuku.UserServiceArgs {
         return Shizuku.UserServiceArgs(ComponentName(context, ShizukuShellService::class.java))
             .daemon(false)
-            .processNameSuffix("dock_shell_v2")
+            .processNameSuffix("dock_shell_v3")
             .debuggable(BuildConfig.DEBUG)
             .version(BuildConfig.VERSION_CODE)
     }
@@ -324,6 +324,29 @@ object ShizukuBridge {
                 ok = false
             }
             mainHandler.post { onDone(ok) }
+        }
+    }
+
+    fun setTaskFullscreenAsync(context: Context, taskId: Int) {
+        if (taskId <= 0) return
+        val ctx = context.applicationContext
+        shellExecutor.execute {
+            try {
+                awaitService(ctx)?.setTaskFullscreen(taskId)
+            } catch (_: Throwable) {
+            }
+        }
+    }
+
+    fun getDiagnosticInfoAsync(context: Context, onDone: (String) -> Unit) {
+        val ctx = context.applicationContext
+        shellExecutor.execute {
+            val info = try {
+                awaitService(ctx)?.getDiagnosticInfo() ?: "service=null"
+            } catch (t: Throwable) {
+                "err=${t.message}"
+            }
+            mainHandler.post { onDone(info) }
         }
     }
 }

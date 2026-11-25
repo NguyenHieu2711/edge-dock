@@ -100,7 +100,10 @@ object DockAppCache {
     fun getLaunchIntent(context: Context, pkg: String): Intent? {
         launchIntentMap[pkg]?.let { return Intent(it) }
         val resolved = try {
-            context.packageManager.getLaunchIntentForPackage(pkg)
+            context.packageManager.getLaunchIntentForPackage(pkg)?.apply {
+                // Strip FLAG_ACTIVITY_RESET_TASK_IF_NEEDED so switching back never resets WebView/SPA screens!
+                flags = flags and Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED.inv()
+            }
         } catch (_: Throwable) {
             null
         }

@@ -303,7 +303,7 @@ class MainActivity : AppCompatActivity() {
             DockPrefs.setHideFromRecents(this, on)
         }
         addDivider(cfgCard)
-        addToggleRow(cfgCard, "Mở cửa sổ nổi Pop-up (Shizuku)", DockPrefs.isPopupMode(this)) { on ->
+        addToggleRow(cfgCard, "Mở cửa sổ nổi Pop-up (Shizuku · dễ trôi icon)", DockPrefs.isPopupMode(this)) { on ->
             DockPrefs.setPopupMode(this, on)
             if (on && !ShizukuBridge.isReadyCached) {
                 Toast.makeText(this, "Cần bật & cấp quyền Shizuku để mở cửa sổ nổi", Toast.LENGTH_SHORT).show()
@@ -541,7 +541,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun handleShizukuAction() {
         when (ShizukuBridge.getStatus(this)) {
-            ShizukuBridge.Status.READY -> Toast.makeText(this, "Shizuku đã kết nối sẵn sàng", Toast.LENGTH_SHORT).show()
+            ShizukuBridge.Status.READY -> {
+                ShizukuBridge.getDiagnosticInfoAsync(this) { info ->
+                    Toast.makeText(this, "Shizuku: $info", Toast.LENGTH_LONG).show()
+                }
+            }
             ShizukuBridge.Status.NEED_PERMISSION -> ShizukuBridge.requestPermission()
             ShizukuBridge.Status.NOT_RUNNING -> {
                 val launch = packageManager.getLaunchIntentForPackage("moe.shizuku.privileged.api")
