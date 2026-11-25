@@ -1,0 +1,4 @@
+-keep class com.nguyenhieu.edgedock.** { *; }
+-keep class rikka.shizuku.** { *; }
+-keep interface com.nguyenhieu.edgedock.IShizukuShellService { *; }
+-keep class com.nguyenhieu.edgedock.IShizukuShellService$** { *; }

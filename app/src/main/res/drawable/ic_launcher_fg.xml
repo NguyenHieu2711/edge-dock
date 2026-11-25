@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Minimalist Flat Side-Panel Card + Glowing Edge Handle -->
+    <path
+        android:fillColor="#273043"
+        android:pathData="M34,28 L66,28 Q72,28 72,34 L72,74 Q72,80 66,80 L34,80 Q28,80 28,74 L28,34 Q28,28 34,28 Z" />
+    <path
+        android:fillColor="#38BDF8"
+        android:pathData="M78,36 L81,36 Q84,36 84,39 L84,69 Q84,72 81,72 L78,72 Q75,72 75,69 L75,39 Q75,36 78,36 Z" />
+    <path
+        android:fillColor="#F3F5F8"
+        android:pathData="M39,37 L47,37 Q49,37 49,39 L49,47 Q49,49 47,49 L39,49 Q37,49 37,47 L37,39 Q37,37 39,37 Z" />
+    <path
+        android:fillColor="#94A3B8"
+        android:pathData="M54,37 L62,37 Q64,37 64,39 L64,47 Q64,49 62,49 L54,49 Q52,49 52,47 L52,39 Q52,37 54,37 Z" />
+    <path
+        android:fillColor="#38BDF8"
+        android:pathData="M39,55 L47,55 Q49,55 49,57 L49,65 Q49,67 47,67 L39,67 Q37,67 37,65 L37,57 Q37,55 39,55 Z" />
+    <path
+        android:fillColor="#F3F5F8"
+        android:pathData="M54,55 L62,55 Q64,55 64,57 L64,65 Q64,67 62,67 L54,67 Q52,67 52,65 L52,57 Q52,55 54,55 Z" />
+</vector>

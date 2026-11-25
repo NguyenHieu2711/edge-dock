@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Edge Dock</string>
+    <string name="accessibility_service_label">Edge Dock (Quay về app trước)</string>
+    <string name="accessibility_service_desc">Ghi nhớ app bạn đang xem (ví dụ YouTube) để bấm nút mờ trên thanh gạt quay về ngay lập tức.</string>
+</resources>
