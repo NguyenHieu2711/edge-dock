@@ -66,8 +66,13 @@ class MainActivity : AppCompatActivity() {
     private lateinit var sideRightBtn: TextView
 
     private var activeDownloadId: Long = -1L
+    private var installTriggeredForId: Long = -1L
     private var activeUpdateApkFile: File? = null
     private var pendingInstallApkFile: File? = null
+    private var mandatoryUpdateDialog: AlertDialog? = null
+    private var updatePromptDismissedThisSession = false
+    private var lastAutoCheckAt: Long = 0L
+    private var downloadPollRunnable: Runnable? = null
 
     private val shizukuListener: () -> Unit = {
         refreshStatusBadges()
@@ -78,11 +83,8 @@ class MainActivity : AppCompatActivity() {
             if (intent?.action != DownloadManager.ACTION_DOWNLOAD_COMPLETE) return
             val id = intent.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1L)
             if (id == -1L || id != activeDownloadId) return
-            activeDownloadId = -1L
-            val f = activeUpdateApkFile
-            if (f != null && f.exists()) {
-                promptInstallApk(f)
-            }
+            val dm = getSystemService(Context.DOWNLOAD_SERVICE) as? DownloadManager ?: return
+            handleDownloadStatusCheck(dm, id)
         }
     }
 
@@ -129,9 +131,13 @@ class MainActivity : AppCompatActivity() {
             return
         }
         refreshAll()
+        checkForUpdate(manual = false)
     }
 
     override fun onDestroy() {
+        stopDownloadPoll()
+        mandatoryUpdateDialog?.dismiss()
+        mandatoryUpdateDialog = null
         ShizukuBridge.removeStatusListener(shizukuListener)
         try {
             unregisterReceiver(downloadReceiver)
@@ -854,41 +860,82 @@ class MainActivity : AppCompatActivity() {
     }
 
     // =========================================================================
-    // LIGHTWEIGHT GITHUB IN-APP APK SELF-UPDATER
+    // GITHUB IN-APP APK SELF-UPDATER (SHA BYPASS CDN + ONRESUME + 600ms POLL)
     // =========================================================================
     private fun checkForUpdate(manual: Boolean) {
+        if (!manual) {
+            val now = System.currentTimeMillis()
+            if (now - lastAutoCheckAt < 5000L) return
+            lastAutoCheckAt = now
+        }
         netExecutor.execute {
             val manifest = fetchLatestManifest()
+            var releaseInfo: Pair<String, String>? = if (manifest != null) {
+                val t = manifest.optString("tag_name", "").trim()
+                val u = manifest.optString("apk_url", "").trim()
+                if (t.isNotEmpty() && u.isNotEmpty()) Pair(t, u) else null
+            } else {
+                null
+            }
+            if (releaseInfo == null) {
+                releaseInfo = fetchFromGitHubReleasesApi()
+            }
+
             mainHandler.post {
                 if (isFinishing || isDestroyed) return@post
-                if (manifest == null) {
-                    if (manual) Toast.makeText(this, "Không kiểm tra được cập nhật", Toast.LENGTH_SHORT).show()
-                    return@post
+                if (releaseInfo != null) {
+                    val (tag, apkUrl) = releaseInfo
+                    if (isNewerVersion(tag, BuildConfig.VERSION_NAME)) {
+                        if (manual || !updatePromptDismissedThisSession) {
+                            showMandatoryUpdateDialog(tag, apkUrl)
+                        }
+                        return@post
+                    }
                 }
-                val tag = manifest.optString("tag_name", "").trim()
-                val apkUrl = manifest.optString("apk_url", "").trim()
-                if (tag.isNotEmpty() && apkUrl.isNotEmpty() && isNewerVersion(tag, BuildConfig.VERSION_NAME)) {
-                    AlertDialog.Builder(this)
-                        .setTitle("Có bản mới ($tag)")
-                        .setMessage("Cập nhật Edge Dock từ v${BuildConfig.VERSION_NAME} lên $tag?")
-                        .setPositiveButton("Cập nhật") { _, _ -> downloadAndInstallApk(tag, apkUrl) }
-                        .setNegativeButton("Để sau", null)
-                        .show()
-                } else if (manual) {
-                    Toast.makeText(this, "Đang ở bản mới nhất (v${BuildConfig.VERSION_NAME})", Toast.LENGTH_SHORT).show()
+                if (manual) {
+                    val msg = if (releaseInfo == null && manifest == null) {
+                        "Không thể kiểm tra cập nhật lúc này."
+                    } else {
+                        "Đang ở bản mới nhất (v${BuildConfig.VERSION_NAME})."
+                    }
+                    Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
                 }
             }
         }
     }
 
-    private fun fetchLatestManifest(): JSONObject? {
+    private fun resolveLatestGithubCommitSha(): String? {
+        val apiUrl = "https://api.github.com/repos/$GITHUB_REPO/commits/main"
         var conn: HttpURLConnection? = null
         return try {
-            val url = "https://raw.githubusercontent.com/$GITHUB_REPO/main/releases/latest.json?t=${System.currentTimeMillis()}"
+            conn = (URL(apiUrl).openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 4500
+                readTimeout = 4500
+                setRequestProperty("Accept", "application/vnd.github+json")
+                setRequestProperty("Cache-Control", "no-cache")
+                setRequestProperty("User-Agent", "EdgeDock-Android/${BuildConfig.VERSION_NAME}")
+            }
+            if (conn.responseCode != HttpURLConnection.HTTP_OK) return null
+            val body = conn.inputStream.bufferedReader().use { it.readText() }
+            JSONObject(body).optString("sha", "").trim().ifEmpty { null }
+        } catch (_: Throwable) {
+            null
+        } finally {
+            conn?.disconnect()
+        }
+    }
+
+    private fun fetchLatestManifest(): JSONObject? {
+        val ref = resolveLatestGithubCommitSha() ?: "main"
+        val url = "https://raw.githubusercontent.com/$GITHUB_REPO/$ref/releases/latest.json?t=${System.currentTimeMillis()}"
+        var conn: HttpURLConnection? = null
+        return try {
             conn = (URL(url).openConnection() as HttpURLConnection).apply {
                 connectTimeout = 4500
                 readTimeout = 4500
                 setRequestProperty("Cache-Control", "no-cache")
+                setRequestProperty("User-Agent", "EdgeDock-Android/${BuildConfig.VERSION_NAME}")
             }
             if (conn.responseCode != HttpURLConnection.HTTP_OK) return null
             JSONObject(conn.inputStream.bufferedReader().use { it.readText() })
@@ -899,9 +946,43 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun fetchFromGitHubReleasesApi(): Pair<String, String>? {
+        val apiUrl = "https://api.github.com/repos/$GITHUB_REPO/releases/latest"
+        var conn: HttpURLConnection? = null
+        return try {
+            conn = (URL(apiUrl).openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 5000
+                readTimeout = 5000
+                setRequestProperty("Accept", "application/vnd.github+json")
+                setRequestProperty("User-Agent", "EdgeDock-Android/${BuildConfig.VERSION_NAME}")
+            }
+            if (conn.responseCode != HttpURLConnection.HTTP_OK) return null
+            val json = JSONObject(conn.inputStream.bufferedReader().use { it.readText() })
+            val tagName = json.optString("tag_name", "").trim()
+            if (tagName.isEmpty()) return null
+            val assets = json.optJSONArray("assets") ?: return null
+            var chosenUrl = ""
+            for (i in 0 until assets.length()) {
+                val asset = assets.optJSONObject(i) ?: continue
+                val name = asset.optString("name", "")
+                val u = asset.optString("browser_download_url", "")
+                if (name.endsWith(".apk", ignoreCase = true) && u.isNotEmpty()) {
+                    chosenUrl = u
+                    if (name.contains("edge-dock", ignoreCase = true)) break
+                }
+            }
+            if (chosenUrl.isEmpty()) null else Pair(tagName, chosenUrl)
+        } catch (_: Throwable) {
+            null
+        } finally {
+            conn?.disconnect()
+        }
+    }
+
     private fun isNewerVersion(remote: String, local: String): Boolean {
-        val r = remote.removePrefix("v").removePrefix("V").split(".").map { it.toIntOrNull() ?: 0 }
-        val l = local.removePrefix("v").removePrefix("V").split(".").map { it.toIntOrNull() ?: 0 }
+        val r = remote.trim().removePrefix("v").removePrefix("V").substringBefore("-").split(".").map { it.toIntOrNull() ?: 0 }
+        val l = local.trim().removePrefix("v").removePrefix("V").substringBefore("-").split(".").map { it.toIntOrNull() ?: 0 }
         val n = maxOf(r.size, l.size)
         for (i in 0 until n) {
             val rv = r.getOrElse(i) { 0 }
@@ -912,22 +993,134 @@ class MainActivity : AppCompatActivity() {
         return false
     }
 
+    private fun showMandatoryUpdateDialog(tagName: String, apkUrl: String) {
+        if (isFinishing || isDestroyed) return
+        mandatoryUpdateDialog?.let { if (it.isShowing) return }
+
+        val existingApk = activeUpdateApkFile
+        if (existingApk != null && existingApk.exists() && existingApk.name.contains(tagName, ignoreCase = true)) {
+            val ready = AlertDialog.Builder(this)
+                .setTitle("Cập nhật mới ($tagName)")
+                .setMessage("Bản $tagName đã tải xong. Bấm Cài đặt ngay để cập nhật.")
+                .setCancelable(true)
+                .setPositiveButton("Cài đặt ngay") { _, _ ->
+                    mandatoryUpdateDialog = null
+                    promptInstallApk(existingApk)
+                }
+                .setNegativeButton("Để sau") { d, _ ->
+                    updatePromptDismissedThisSession = true
+                    mandatoryUpdateDialog = null
+                    d.dismiss()
+                }
+                .create()
+            mandatoryUpdateDialog = ready
+            ready.show()
+            return
+        }
+
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("Có bản cập nhật mới ($tagName)")
+            .setMessage("Phiên bản $tagName đã sẵn sàng (hiện tại: v${BuildConfig.VERSION_NAME}).")
+            .setCancelable(true)
+            .setPositiveButton("Cập nhật ngay") { _, _ ->
+                showDownloadingLockDialog(tagName)
+                downloadAndInstallApk(tagName, apkUrl)
+            }
+            .setNegativeButton("Để sau") { d, _ ->
+                updatePromptDismissedThisSession = true
+                mandatoryUpdateDialog = null
+                d.dismiss()
+            }
+            .create()
+        mandatoryUpdateDialog = dialog
+        dialog.show()
+    }
+
+    private fun showDownloadingLockDialog(tagName: String) {
+        if (isFinishing || isDestroyed) return
+        mandatoryUpdateDialog?.dismiss()
+        val progress = AlertDialog.Builder(this)
+            .setTitle("Đang tải bản cập nhật $tagName...")
+            .setMessage("Vui lòng chờ giây lát, gói cài đặt sẽ tự động bật lên ngay khi tải xong.")
+            .setCancelable(false)
+            .create()
+        mandatoryUpdateDialog = progress
+        progress.show()
+    }
+
+    private fun stopDownloadPoll() {
+        downloadPollRunnable?.let { mainHandler.removeCallbacks(it) }
+        downloadPollRunnable = null
+    }
+
+    private fun handleDownloadStatusCheck(dm: DownloadManager, downloadId: Long): Boolean {
+        if (downloadId == -1L || installTriggeredForId == downloadId) return true
+        val query = DownloadManager.Query().setFilterById(downloadId)
+        dm.query(query)?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                val idx = cursor.getColumnIndex(DownloadManager.COLUMN_STATUS)
+                if (idx >= 0) {
+                    when (cursor.getInt(idx)) {
+                        DownloadManager.STATUS_SUCCESSFUL -> {
+                            installTriggeredForId = downloadId
+                            activeDownloadId = -1L
+                            stopDownloadPoll()
+                            mandatoryUpdateDialog?.dismiss()
+                            mandatoryUpdateDialog = null
+                            activeUpdateApkFile?.let { if (it.exists()) promptInstallApk(it) }
+                            return true
+                        }
+                        DownloadManager.STATUS_FAILED -> {
+                            installTriggeredForId = downloadId
+                            activeDownloadId = -1L
+                            stopDownloadPoll()
+                            mandatoryUpdateDialog?.dismiss()
+                            mandatoryUpdateDialog = null
+                            Toast.makeText(this, "Tải bản cập nhật thất bại, vui lòng thử lại.", Toast.LENGTH_SHORT).show()
+                            return true
+                        }
+                    }
+                }
+            }
+        }
+        return false
+    }
+
     private fun downloadAndInstallApk(tag: String, apkUrl: String) {
         try {
+            val safeTag = tag.replace(Regex("[^a-zA-Z0-9._-]"), "_")
             val dir = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: return
             dir.listFiles()?.forEach { if (it.name.endsWith(".apk", true)) it.delete() }
-            val name = "edge-dock-$tag.apk"
+            val name = "edge-dock-$safeTag.apk"
             activeUpdateApkFile = File(dir, name)
             val req = DownloadManager.Request(Uri.parse(apkUrl))
-                .setTitle("Đang tải Edge Dock $tag")
+                .setTitle("Cập nhật Edge Dock ($tag)")
+                .setDescription("Đang tải gói cài đặt từ GitHub Releases...")
                 .setMimeType("application/vnd.android.package-archive")
                 .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE)
+                .setAllowedOverMetered(true)
+                .setAllowedOverRoaming(true)
                 .setDestinationInExternalFilesDir(this, Environment.DIRECTORY_DOWNLOADS, name)
             val dm = getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+            installTriggeredForId = -1L
             activeDownloadId = dm.enqueue(req)
-            Toast.makeText(this, "Đang tải $tag...", Toast.LENGTH_SHORT).show()
-        } catch (_: Throwable) {
-            Toast.makeText(this, "Lỗi tải bản cập nhật", Toast.LENGTH_SHORT).show()
+
+            stopDownloadPoll()
+            val r = object : Runnable {
+                override fun run() {
+                    if (isFinishing || isDestroyed || activeDownloadId == -1L) return
+                    if (!handleDownloadStatusCheck(dm, activeDownloadId)) {
+                        mainHandler.postDelayed(this, 600L)
+                    }
+                }
+            }
+            downloadPollRunnable = r
+            mainHandler.postDelayed(r, 600L)
+        } catch (e: Throwable) {
+            stopDownloadPoll()
+            mandatoryUpdateDialog?.dismiss()
+            mandatoryUpdateDialog = null
+            Toast.makeText(this, "Lỗi tải bản cập nhật: ${e.message}", Toast.LENGTH_SHORT).show()
         }
     }
 
