@@ -99,13 +99,15 @@ object AppLauncherEngine {
     ) {
         launchNativeIntent(context, launchIntent, hideRecents)
 
-        // Wait 850ms so Android 14 Shell Transition finishes completely BEFORE querying taskId!
+        // Wait for Android 14 Shell Transition & slow Splash->Main transitions, then record taskId
         if (ShizukuBridge.isReadyCached) {
-            mainHandler.postDelayed({
-                ShizukuBridge.captureTaskIdAsync(context, pkg) { tid ->
-                    if (tid > 0) DockSessionTracker.rememberDockTaskId(pkg, tid)
-                }
-            }, 850L)
+            for (delayMs in longArrayOf(850L, 2100L)) {
+                mainHandler.postDelayed({
+                    ShizukuBridge.captureTaskIdAsync(context, pkg) { tid ->
+                        if (tid > 0) DockSessionTracker.rememberDockTaskId(pkg, tid)
+                    }
+                }, delayMs)
+            }
         }
     }
 
@@ -113,7 +115,6 @@ object AppLauncherEngine {
         try {
             val intent = Intent(baseIntent).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
                 if (hideRecents) {
                     addFlags(Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS)
                 }
@@ -183,11 +184,7 @@ object AppLauncherEngine {
     private fun bringPackageToFront(context: Context, pkg: String): Boolean {
         return try {
             val launch = DockAppCache.getLaunchIntent(context, pkg) ?: return false
-            launch.addFlags(
-                Intent.FLAG_ACTIVITY_NEW_TASK or
-                    Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or
-                    Intent.FLAG_ACTIVITY_SINGLE_TOP
-            )
+            launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             context.startActivity(launch)
             true
         } catch (_: Throwable) {

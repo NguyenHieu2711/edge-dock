@@ -103,7 +103,7 @@ class EdgeOverlayService : Service() {
         override fun run() {
             val activePkg = DockSessionTracker.activeDockPackage ?: return
             val elapsed = System.currentTimeMillis() - DockSessionTracker.sessionStartedAt
-            if (elapsed >= 750L) {
+            if (elapsed >= 1200L) {
                 val acc = EdgeDockAccessibilityService.instance
                 if (acc != null) {
                     if (!acc.isPackageVisibleNow(activePkg)) {
@@ -129,7 +129,7 @@ class EdgeOverlayService : Service() {
     private fun syncSessionWatchdog() {
         mainHandler.removeCallbacks(sessionWatchdog)
         if (DockSessionTracker.isSessionActive()) {
-            mainHandler.postDelayed(sessionWatchdog, 750L)
+            mainHandler.postDelayed(sessionWatchdog, 1200L)
         }
     }
 

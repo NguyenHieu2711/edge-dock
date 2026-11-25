@@ -259,6 +259,12 @@ object ShizukuBridge {
                                 ok = svc.moveTaskToFront(resolvedTid)
                             }
                         }
+                        if (excludeFromRecents && ok && resolvedTid > 0) {
+                            try {
+                                svc.setTaskExcludedFromRecents(resolvedTid, true)
+                            } catch (_: Throwable) {
+                            }
+                        }
                     }
                 }
             } catch (_: Throwable) {

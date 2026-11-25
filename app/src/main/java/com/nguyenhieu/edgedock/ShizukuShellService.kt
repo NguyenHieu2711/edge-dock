@@ -159,7 +159,49 @@ class ShizukuShellService : IShizukuShellService.Stub() {
         }
 
         // 2. Recent tasks WITH ActivityManager.RECENT_WITH_EXCLUDED (0x0001)
-        return findInRecentTasksWithExcluded(target)
+        val fromRecent = findInRecentTasksWithExcluded(target)
+        if (fromRecent > 0) return fromRecent
+
+        // 3. Fallback via dumpsys activity recents
+        return findTaskIdViaDumpsys(target)
+    }
+
+    private fun findTopComponentForTaskId(taskId: Int): String {
+        if (taskId <= 0) return ""
+        try {
+            for (t in queryRunningTasks()) {
+                if (t.taskId == taskId) {
+                    t.topActivity?.let { return it.flattenToShortString() }
+                }
+            }
+            val atm = getActivityTaskManager()
+            if (atm != null) {
+                val m = atm.javaClass.methods.firstOrNull {
+                    it.name == "getRecentTasks" && it.parameterTypes.size == 3
+                }
+                if (m != null) {
+                    m.isAccessible = true
+                    val slice = m.invoke(atm, 40, 0x0001 or 0x0002, 0)
+                    val getList = slice?.javaClass?.methods?.firstOrNull { it.name == "getList" }
+                    getList?.isAccessible = true
+                    @Suppress("UNCHECKED_CAST")
+                    val list = getList?.invoke(slice) as? List<ActivityManager.RecentTaskInfo>
+                    if (list != null) {
+                        for (rt in list) {
+                            val tid = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) rt.taskId else {
+                                @Suppress("DEPRECATION")
+                                rt.persistentId
+                            }
+                            if (tid == taskId) {
+                                rt.topActivity?.let { return it.flattenToShortString() }
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (_: Throwable) {
+        }
+        return ""
     }
 
     @Suppress("UNCHECKED_CAST")
@@ -269,8 +311,22 @@ class ShizukuShellService : IShizukuShellService.Stub() {
                     m.invoke(am, null, caller, taskId, 0, optsBundle)
                     return true
                 }
-            } catch (_: Throwable) {
+            } catch (t: Throwable) {
+                lastError = "amMove:${t.cause?.javaClass?.simpleName ?: t.javaClass.simpleName}:${t.cause?.message}"
             }
+        }
+
+        // 4. Android 14 shell UID 2000 fallback: resume exact running topActivity directly (never SplashActivity!)
+        val topCmp = findTopComponentForTaskId(taskId)
+        if (topCmp.isNotEmpty()) {
+            val out = execCommand("am start -n '$topCmp' -f 0x30020000")
+            if (!out.contains("Error", ignoreCase = true) &&
+                !out.contains("Exception", ignoreCase = true) &&
+                !out.startsWith("ERR:")
+            ) {
+                return true
+            }
+            lastError = "amStart:${out.take(120)}"
         }
         return false
     }
