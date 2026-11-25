@@ -301,8 +301,8 @@ class EdgeOverlayService : Service() {
         val rightSide = DockPrefs.isRightSide(this)
         val activeSession = DockSessionTracker.isSessionActive()
 
-        val heightPx = if (activeSession) dp(58f) else dp(DockPrefs.getHandleHeightDp(this).toFloat())
-        val widthPx = if (activeSession) dp(30f) else dp(24f)
+        val heightPx = if (activeSession) dp(68f) else dp(DockPrefs.getHandleHeightDp(this).toFloat())
+        val widthPx = if (activeSession) dp(38f) else dp(26f)
         val yPx = ((screenHeightPx() - heightPx) * (DockPrefs.getHandleYPct(this) / 100f)).toInt()
 
         params.width = widthPx
@@ -453,7 +453,8 @@ class EdgeOverlayService : Service() {
                     if (!swipeTriggered) {
                         val dx = abs(ev.rawX - downRawX)
                         val dy = abs(ev.rawY - downRawY)
-                        if (dx < dp(14f) && dy < dp(14f)) {
+                        val tapLimit = if (DockSessionTracker.isSessionActive()) dp(26f) else dp(15f)
+                        if (dx < tapLimit && dy < tapLimit) {
                             vibrateLight(10L)
                             if (DockSessionTracker.isSessionActive()) {
                                 AppLauncherEngine.dismissActiveDockApp(this)

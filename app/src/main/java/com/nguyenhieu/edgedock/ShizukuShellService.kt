@@ -231,21 +231,8 @@ class ShizukuShellService : IShizukuShellService.Stub() {
 
         val atm = getActivityTaskManager()
         if (atm != null) {
-            // 1. Primary: IActivityTaskManager.startActivityFromRecents (verified return >= 0!)
-            try {
-                val m = atm.javaClass.methods.firstOrNull {
-                    it.name == "startActivityFromRecents" && it.parameterTypes.size == 2
-                }
-                if (m != null) {
-                    m.isAccessible = true
-                    val res = m.invoke(atm, taskId, optsBundle)
-                    if (res is Int && res >= 0) return true
-                }
-            } catch (t: Throwable) {
-                lastError = "recStart:${t.cause?.javaClass?.simpleName ?: t.javaClass.simpleName}:${t.cause?.message}"
-            }
-
-            // 2. Fallback: IActivityTaskManager.moveTaskToFront(IApplicationThread, callerPkg, taskId, flags, options)
+            // 1. Primary: IActivityTaskManager.moveTaskToFront moves any live RAM task (even while loading/hidden)
+            // directly to the front WITHOUT re-creating activities!
             try {
                 val m = atm.javaClass.methods.firstOrNull {
                     it.name == "moveTaskToFront" && it.parameterTypes.size == 5
@@ -257,6 +244,20 @@ class ShizukuShellService : IShizukuShellService.Stub() {
                 }
             } catch (t: Throwable) {
                 lastError = "moveFront:${t.cause?.javaClass?.simpleName ?: t.javaClass.simpleName}:${t.cause?.message}"
+            }
+
+            // 2. Fallback: IActivityTaskManager.startActivityFromRecents
+            try {
+                val m = atm.javaClass.methods.firstOrNull {
+                    it.name == "startActivityFromRecents" && it.parameterTypes.size == 2
+                }
+                if (m != null) {
+                    m.isAccessible = true
+                    val res = m.invoke(atm, taskId, optsBundle)
+                    if (res is Int && res >= 0) return true
+                }
+            } catch (t: Throwable) {
+                lastError = "recStart:${t.cause?.javaClass?.simpleName ?: t.javaClass.simpleName}:${t.cause?.message}"
             }
         }
 

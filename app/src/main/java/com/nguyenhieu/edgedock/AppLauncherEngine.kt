@@ -9,6 +9,8 @@ import android.widget.Toast
 object AppLauncherEngine {
 
     private val mainHandler = Handler(Looper.getMainLooper())
+    @Volatile
+    private var dismissSeq: Int = 0
     // FLAG_ACTIVITY_NEW_TASK (0x10000000) | FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS (0x00800000)
     private const val FLAGS_NEW_EXCLUDE_RECENTS = 0x10800000
 
@@ -41,6 +43,7 @@ object AppLauncherEngine {
     }
 
     fun launchDockApp(context: Context, entry: DockAppEntry) {
+        dismissSeq++
         val launchIntent = DockAppCache.getLaunchIntent(context, entry.packageName)
         if (launchIntent == null) {
             Toast.makeText(context, "Không tìm thấy ${entry.label}", Toast.LENGTH_SHORT).show()
@@ -147,11 +150,13 @@ object AppLauncherEngine {
      * - Force-stops the Dock app via Shizuku if keepAlive == false.
      */
     fun dismissActiveDockApp(context: Context) {
+        val myDismissSeq = ++dismissSeq
         val dockPkg = DockSessionTracker.activeDockPackage
         val returnPkg = DockSessionTracker.returnTargetPackage
         val returnTid = DockSessionTracker.returnTargetTaskId
         val wasHome = DockSessionTracker.returnWasHome
         val wasPopup = DockSessionTracker.openedInPopupMode
+        val elapsedSinceLaunch = System.currentTimeMillis() - DockSessionTracker.sessionStartedAt
 
         DockSessionTracker.clearSession()
 
@@ -160,12 +165,23 @@ object AppLauncherEngine {
         val hideRecents = DockPrefs.isHideFromRecents(context)
         val shizukuReady = ShizukuBridge.isReadyCached
 
-        // If user enabled Pop-up mode, normalize the dock task to Fullscreen behind YouTube
-        // so Samsung One UI NEVER leaves a minimized floating icon bubble on screen!
         if (wasPopup && shizukuReady && !dockPkg.isNullOrBlank()) {
             val dockTid = DockSessionTracker.getKnownDockTaskId(dockPkg)
             if (dockTid > 0 && keepAlive) {
                 ShizukuBridge.setTaskFullscreenAsync(context, dockTid)
+            }
+        }
+
+        val bringTargetBackNow: () -> Unit = {
+            if (wasHome) {
+                val acc = EdgeDockAccessibilityService.instance
+                if (acc == null || !acc.goHome()) goHomeViaIntent(context)
+            } else if (shizukuReady && (returnTid > 0 || !returnPkg.isNullOrBlank())) {
+                ShizukuBridge.moveTaskOrPackageToFrontAsync(context, returnTid, returnPkg) { moved ->
+                    if (!moved) restoreViaIntentOrHome(context, returnPkg)
+                }
+            } else {
+                restoreViaIntentOrHome(context, returnPkg)
             }
         }
 
@@ -175,55 +191,57 @@ object AppLauncherEngine {
                     DockSessionTracker.forgetDockTaskId(dockPkg)
                     mainHandler.postDelayed({
                         ShizukuBridge.execAsync(context, "am force-stop '$dockPkg'")
-                    }, 180L)
+                    }, 160L)
                 } else if (hideRecents) {
                     val dockTid = DockSessionTracker.getKnownDockTaskId(dockPkg)
                     mainHandler.postDelayed({
                         ShizukuBridge.captureAndHideTaskAsync(context, dockPkg, true) { tid ->
                             if (tid > 0) DockSessionTracker.rememberDockTaskId(dockPkg, tid)
-                            else if (dockTid > 0) {
-                                // Keep existing known taskId
-                                DockSessionTracker.rememberDockTaskId(dockPkg, dockTid)
-                            }
+                            else if (dockTid > 0) DockSessionTracker.rememberDockTaskId(dockPkg, dockTid)
                         }
                     }, 120L)
                 }
             }
-        }
 
-        // Case 1: Genuine Home Screen origin -> return cleanly to Home
-        if (wasHome) {
-            val acc = EdgeDockAccessibilityService.instance
-            if (acc == null || !acc.goHome()) goHomeViaIntent(context)
-            afterRestore()
-            return
-        }
-
-        // Case 2: Shizuku ready & we have YouTube's exact taskId or packageName -> moveTaskToFront (0 reload, NEVER closes YouTube!)
-        if (shizukuReady && (returnTid > 0 || !returnPkg.isNullOrBlank())) {
-            ShizukuBridge.moveTaskOrPackageToFrontAsync(context, returnTid, returnPkg) { moved ->
-                if (!moved) {
-                    restoreViaIntentOrBack(context, returnPkg)
+            // ANTI-SPLASH RE-SURGE GUARD:
+            // If user tapped X while the dock app was still mid-loading (e.g. SplashActivity -> MainActivity),
+            // guard at +320ms and +750ms: if that dismissed app popped back on top, immediately pull YouTube back up!
+            if (keepAlive && !dockPkg.isNullOrBlank() && elapsedSinceLaunch < 4500L) {
+                val guardDelays = longArrayOf(320L, 750L)
+                for (delayMs in guardDelays) {
+                    mainHandler.postDelayed({
+                        if (dismissSeq != myDismissSeq || DockSessionTracker.isSessionActive()) return@postDelayed
+                        val currentTop = EdgeDockAccessibilityService.instance?.detectTopAppPackageNow()
+                        if (currentTop == dockPkg) {
+                            bringTargetBackNow()
+                        } else if (currentTop == null && shizukuReady) {
+                            val ignoreCsv = "${context.packageName},com.android.systemui,android"
+                            ShizukuBridge.getTopTaskAsync(context, ignoreCsv) { _, pkg ->
+                                if (dismissSeq == myDismissSeq && !DockSessionTracker.isSessionActive() && pkg == dockPkg) {
+                                    bringTargetBackNow()
+                                }
+                            }
+                        }
+                    }, delayMs)
                 }
-                afterRestore()
             }
-            return
         }
 
-        // Case 3: Fallback without Shizuku -> restore YouTube via Intent or Back (NEVER blindly call goHome!)
-        restoreViaIntentOrBack(context, returnPkg)
+        bringTargetBackNow()
         afterRestore()
     }
 
-    private fun restoreViaIntentOrBack(context: Context, returnPkg: String?) {
+    private fun restoreViaIntentOrHome(context: Context, returnPkg: String?) {
         if (!returnPkg.isNullOrBlank() && bringPackageToFront(context, returnPkg)) {
             return
         }
         val acc = EdgeDockAccessibilityService.instance
         if (acc != null) {
-            acc.goBack()
+            if (!acc.goHome()) {
+                goHomeViaIntent(context)
+            }
         } else {
-            Toast.makeText(context, "Bật quyền Accessibility hoặc Shizuku để quay về app trước", Toast.LENGTH_SHORT).show()
+            goHomeViaIntent(context)
         }
     }
 
