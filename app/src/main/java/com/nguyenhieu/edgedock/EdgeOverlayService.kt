@@ -338,9 +338,16 @@ class EdgeOverlayService : Service() {
         var dragMode = false
         var swipeTriggered = false
         val longPressRunnable = Runnable {
-            dragMode = true
-            vibrateLight(18L)
-            handleVisual?.alpha = 0.92f
+            if (DockSessionTracker.isSessionActive()) {
+                // Holding the dim edge indicator opens Dock Panel to jump to another quick app (keeping YouTube!)
+                swipeTriggered = true
+                vibrateLight(14L)
+                openDockPanel()
+            } else {
+                dragMode = true
+                vibrateLight(18L)
+                handleVisual?.alpha = 0.92f
+            }
         }
 
         root.setOnTouchListener { _, ev ->
@@ -352,7 +359,11 @@ class EdgeOverlayService : Service() {
                     startY = handleParams?.y ?: 0
                     dragMode = false
                     swipeTriggered = false
-                    mainHandler.postDelayed(longPressRunnable, 380L)
+                    // Capture YouTube's live taskId & package RIGHT ON TOUCH before any overlay appears!
+                    if (!DockSessionTracker.isSessionActive()) {
+                        AppLauncherEngine.captureUnderlyingAppSnapshot(this)
+                    }
+                    mainHandler.postDelayed(longPressRunnable, if (DockSessionTracker.isSessionActive()) 280L else 380L)
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
@@ -374,12 +385,18 @@ class EdgeOverlayService : Service() {
                         mainHandler.removeCallbacks(longPressRunnable)
                     }
 
-                    // Hair-trigger 11dp inward flick opens the Dock with 0ms delay!
+                    // Hair-trigger 11dp swipe:
+                    // - Idle (e.g. on YouTube): opens Dock immediately!
+                    // - Active (inside Dock app like Anti): swiping back immediately returns to YouTube!
                     val inwardDx = if (rightSide) -dx else dx
                     if (!swipeTriggered && inwardDx > dp(11f) && inwardDx > abs(dy) * 1.05f) {
                         swipeTriggered = true
                         vibrateLight(8L)
-                        openDockPanel()
+                        if (DockSessionTracker.isSessionActive()) {
+                            AppLauncherEngine.dismissActiveDockApp(this)
+                        } else {
+                            openDockPanel()
+                        }
                     }
                     true
                 }

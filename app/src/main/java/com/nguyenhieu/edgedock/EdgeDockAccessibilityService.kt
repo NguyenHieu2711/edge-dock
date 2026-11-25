@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.provider.Settings
 import android.view.accessibility.AccessibilityEvent
+import android.view.accessibility.AccessibilityWindowInfo
 import android.view.inputmethod.InputMethodManager
 
 class EdgeDockAccessibilityService : AccessibilityService() {
@@ -38,6 +39,10 @@ class EdgeDockAccessibilityService : AccessibilityService() {
         super.onServiceConnected()
         instance = this
         refreshSystemPackageCaches()
+        detectTopAppPackageNow()?.let { pkg ->
+            DockSessionTracker.currentForegroundPackage = pkg
+            DockAppCache.warmLaunchIntentAsync(this, pkg)
+        }
     }
 
     override fun onDestroy() {
@@ -48,17 +53,49 @@ class EdgeDockAccessibilityService : AccessibilityService() {
     override fun onInterrupt() {}
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        if (event?.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
-        val pkg = event.packageName?.toString()?.trim().orEmpty()
-        if (pkg.isEmpty()) return
+        val type = event?.eventType ?: return
+        if (type != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED && type != AccessibilityEvent.TYPE_WINDOWS_CHANGED) return
 
         if (System.currentTimeMillis() - lastCacheAt > 60_000L) {
             refreshSystemPackageCaches()
         }
 
-        if (shouldIgnoreTransientPackage(pkg)) return
+        val eventPkg = event.packageName?.toString()?.trim().orEmpty()
+        val pkg = if (eventPkg.isNotEmpty() && !shouldIgnoreTransientPackage(eventPkg)) {
+            eventPkg
+        } else {
+            detectTopAppPackageNow().orEmpty()
+        }
+        if (pkg.isEmpty() || shouldIgnoreTransientPackage(pkg)) return
+
         val isLauncher = pkg in cachedLauncherPkgs
+        if (!isLauncher) {
+            DockAppCache.warmLaunchIntentAsync(this, pkg)
+        }
         DockSessionTracker.onForegroundPackageChanged(pkg, isLauncher)
+    }
+
+    /**
+     * Live inspection of the current interactive window stack.
+     * Accurately identifies YouTube or any open app even if it was opened hours before Edge Dock started!
+     */
+    fun detectTopAppPackageNow(): String? {
+        return try {
+            val winList = windows ?: return null
+            val appWindows = winList
+                .filter { it.type == AccessibilityWindowInfo.TYPE_APPLICATION }
+                .sortedByDescending { it.layer }
+            for (w in appWindows) {
+                val root = w.root
+                val p = root?.packageName?.toString()?.trim().orEmpty()
+                if (p.isNotEmpty() && !shouldIgnoreTransientPackage(p)) {
+                    return p
+                }
+            }
+            null
+        } catch (_: Throwable) {
+            null
+        }
     }
 
     private fun refreshSystemPackageCaches() {

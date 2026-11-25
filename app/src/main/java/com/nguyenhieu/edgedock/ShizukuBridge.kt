@@ -43,7 +43,9 @@ object ShizukuBridge {
     private var appContext: Context? = null
 
     private val binderReceivedListener = Shizuku.OnBinderReceivedListener {
-        appContext?.let { maybeBindService(it) }
+        appContext?.let { ctx ->
+            shellExecutor.execute { getStatus(ctx) }
+        }
         notifyListeners()
     }
 
@@ -58,6 +60,7 @@ object ShizukuBridge {
         Shizuku.OnRequestPermissionResultListener { requestCode, grantResult ->
             if (requestCode == REQ_CODE_SHIZUKU) {
                 if (grantResult == PackageManager.PERMISSION_GRANTED) {
+                    isReadyCached = true
                     appContext?.let { maybeBindService(it) }
                 }
                 notifyListeners()
@@ -165,7 +168,7 @@ object ShizukuBridge {
     private fun buildServiceArgs(context: Context): Shizuku.UserServiceArgs {
         return Shizuku.UserServiceArgs(ComponentName(context, ShizukuShellService::class.java))
             .daemon(false)
-            .processNameSuffix("dock_shell")
+            .processNameSuffix("dock_shell_v2")
             .debuggable(BuildConfig.DEBUG)
             .version(BuildConfig.VERSION_CODE)
     }
@@ -182,35 +185,145 @@ object ShizukuBridge {
         }
     }
 
-    fun execAsync(context: Context, command: String, onDone: ((String?) -> Unit)? = null) {
-        val ctx = context.applicationContext
-        shellExecutor.execute {
-            val result = execBlocking(ctx, command)
-            if (onDone != null) {
-                mainHandler.post { onDone(result) }
-            }
-        }
-    }
-
-    fun execBlocking(context: Context, command: String): String? {
+    private fun awaitService(context: Context): IShizukuShellService? {
+        shellService?.let { if (it.asBinder().pingBinder()) return it else shellService = null }
         if (getStatus(context) != Status.READY) return null
         maybeBindService(context)
-        // Wait briefly if UserService is still binding
         var tries = 0
-        while (shellService == null && tries < 18) {
+        while (shellService == null && tries < 14) {
             try {
-                Thread.sleep(50)
+                Thread.sleep(35)
             } catch (_: InterruptedException) {
                 break
             }
             tries++
         }
-        val svc = shellService ?: return null
-        return try {
-            svc.execCommand(command)
-        } catch (_: Throwable) {
-            shellService = null
-            null
+        return shellService
+    }
+
+    fun execAsync(context: Context, command: String, onDone: ((String?) -> Unit)? = null) {
+        val ctx = context.applicationContext
+        shellExecutor.execute {
+            val res = try {
+                awaitService(ctx)?.execCommand(command)
+            } catch (_: Throwable) {
+                shellService = null
+                null
+            }
+            if (onDone != null) mainHandler.post { onDone(res) }
+        }
+    }
+
+    fun getTopTaskAsync(context: Context, ignoreCsv: String, onDone: (Int, String) -> Unit) {
+        val ctx = context.applicationContext
+        shellExecutor.execute {
+            var tid = -1
+            var pkg = ""
+            try {
+                val raw = awaitService(ctx)?.getTopTaskInfo(ignoreCsv).orEmpty()
+                val idx = raw.indexOf('|')
+                if (idx > 0) {
+                    tid = raw.substring(0, idx).toIntOrNull() ?: -1
+                    pkg = raw.substring(idx + 1).trim()
+                }
+            } catch (_: Throwable) {
+                shellService = null
+            }
+            mainHandler.post { onDone(tid, pkg) }
+        }
+    }
+
+    fun resumeExistingPackageTaskAsync(
+        context: Context,
+        packageName: String,
+        knownTaskId: Int,
+        excludeFromRecents: Boolean,
+        onResult: (Boolean, Int) -> Unit
+    ) {
+        val ctx = context.applicationContext
+        shellExecutor.execute {
+            var ok = false
+            var resolvedTid = knownTaskId
+            try {
+                val svc = awaitService(ctx)
+                if (svc != null) {
+                    if (resolvedTid <= 0) {
+                        resolvedTid = svc.findTaskIdForPackage(packageName)
+                    }
+                    if (resolvedTid > 0) {
+                        ok = svc.moveTaskToFront(resolvedTid)
+                        if (!ok) {
+                            // Task ID might have changed; re-query once by packageName
+                            val freshTid = svc.findTaskIdForPackage(packageName)
+                            if (freshTid > 0 && freshTid != resolvedTid) {
+                                resolvedTid = freshTid
+                                ok = svc.moveTaskToFront(resolvedTid)
+                            }
+                        }
+                        if (ok && excludeFromRecents) {
+                            svc.setTaskExcludedFromRecents(resolvedTid, true)
+                        }
+                    }
+                }
+            } catch (_: Throwable) {
+                shellService = null
+                ok = false
+            }
+            mainHandler.post { onResult(ok, resolvedTid) }
+        }
+    }
+
+    fun captureAndHideTaskAsync(
+        context: Context,
+        packageName: String,
+        excludeFromRecents: Boolean,
+        onCaptured: (Int) -> Unit
+    ) {
+        val ctx = context.applicationContext
+        shellExecutor.execute {
+            var tid = -1
+            try {
+                val svc = awaitService(ctx)
+                if (svc != null) {
+                    tid = svc.findTaskIdForPackage(packageName)
+                    if (tid > 0 && excludeFromRecents) {
+                        svc.setTaskExcludedFromRecents(tid, true)
+                    }
+                }
+            } catch (_: Throwable) {
+                shellService = null
+            }
+            mainHandler.post { onCaptured(tid) }
+        }
+    }
+
+    fun moveTaskOrPackageToFrontAsync(
+        context: Context,
+        taskId: Int,
+        packageName: String?,
+        onDone: (Boolean) -> Unit
+    ) {
+        val ctx = context.applicationContext
+        shellExecutor.execute {
+            var ok = false
+            try {
+                val svc = awaitService(ctx)
+                if (svc != null) {
+                    if (taskId > 0) {
+                        ok = svc.moveTaskToFront(taskId)
+                    }
+                    if (!ok && !packageName.isNullOrBlank()) {
+                        val found = svc.findTaskIdForPackage(packageName)
+                        if (found > 0) {
+                            ok = svc.moveTaskToFront(found)
+                        }
+                    }
+                }
+            } catch (_: Throwable) {
+                shellService = null
+                ok = false
+            }
+            mainHandler.post { onDone(ok) }
         }
     }
 }

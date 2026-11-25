@@ -2,21 +2,35 @@ package com.nguyenhieu.edgedock
 
 import android.os.Handler
 import android.os.Looper
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArraySet
 
 object DockSessionTracker {
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val listeners = CopyOnWriteArraySet<() -> Unit>()
+    private val knownDockTaskIds = ConcurrentHashMap<String, Int>()
 
     @Volatile
     var currentForegroundPackage: String? = null
+
+    @Volatile
+    var snapshotUnderlyingPackage: String? = null
+
+    @Volatile
+    var snapshotUnderlyingTaskId: Int = -1
+
+    @Volatile
+    var snapshotWasHome: Boolean = false
 
     @Volatile
     var activeDockPackage: String? = null
 
     @Volatile
     var returnTargetPackage: String? = null
+
+    @Volatile
+    var returnTargetTaskId: Int = -1
 
     @Volatile
     var returnWasHome: Boolean = false
@@ -28,6 +42,28 @@ object DockSessionTracker {
     var sessionStartedAt: Long = 0L
 
     fun isSessionActive(): Boolean = !activeDockPackage.isNullOrBlank()
+
+    fun rememberDockTaskId(pkg: String, taskId: Int) {
+        if (pkg.isNotBlank() && taskId > 0) knownDockTaskIds[pkg] = taskId
+    }
+
+    fun getKnownDockTaskId(pkg: String): Int = knownDockTaskIds[pkg] ?: -1
+
+    fun forgetDockTaskId(pkg: String) {
+        knownDockTaskIds.remove(pkg)
+    }
+
+    fun savePreOpenSnapshot(pkg: String?, taskId: Int, isHome: Boolean) {
+        // Never overwrite YouTube snapshot while already inside a Dock session
+        if (isSessionActive()) return
+        if (!pkg.isNullOrBlank()) {
+            snapshotUnderlyingPackage = pkg
+            snapshotWasHome = isHome
+        }
+        if (taskId > 0) {
+            snapshotUnderlyingTaskId = taskId
+        }
+    }
 
     fun addListener(listener: () -> Unit) {
         listeners.add(listener)
@@ -51,12 +87,13 @@ object DockSessionTracker {
     fun startSession(
         dockPkg: String,
         previousPkg: String?,
+        previousTaskId: Int,
         fromHome: Boolean,
         inPopupMode: Boolean
     ) {
-        // Keep the original underlying app (e.g. YouTube) if switching directly between 2 Dock apps
         if (!isSessionActive()) {
             returnTargetPackage = previousPkg
+            returnTargetTaskId = previousTaskId
             returnWasHome = fromHome
         }
         activeDockPackage = dockPkg
@@ -69,24 +106,23 @@ object DockSessionTracker {
         val hadSession = isSessionActive()
         activeDockPackage = null
         returnTargetPackage = null
+        returnTargetTaskId = -1
         returnWasHome = false
         openedInPopupMode = false
         sessionStartedAt = 0L
+        snapshotUnderlyingPackage = null
+        snapshotUnderlyingTaskId = -1
+        snapshotWasHome = false
         if (hadSession) notifyStateChanged()
     }
 
     fun onForegroundPackageChanged(pkg: String, isLauncher: Boolean) {
         currentForegroundPackage = pkg
         val active = activeDockPackage ?: return
-        // Give transition 1.4s grace window so launch animations don't prematurely reset the dim pill
-        if (System.currentTimeMillis() - sessionStartedAt < 1400L) return
+        if (System.currentTimeMillis() - sessionStartedAt < 1600L) return
         if (pkg != active) {
-            // In popup mode the underlying app (e.g. YouTube) can still emit window events, so keep dim pill visible
             if (openedInPopupMode && pkg == returnTargetPackage) return
-            // User manually left the dock app (went Home or switched to another app)
-            if (isLauncher || pkg != active) {
-                clearSession()
-            }
+            clearSession()
         }
     }
 }
