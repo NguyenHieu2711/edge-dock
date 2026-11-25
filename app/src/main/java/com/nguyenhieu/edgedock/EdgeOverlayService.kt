@@ -574,8 +574,10 @@ class EdgeOverlayService : Service() {
 
                 cell.setOnClickListener {
                     vibrateLight(8L)
-                    closeDockPanel()
+                    // Launch FIRST while focused overlay window is still attached (Android 14 BAL exemption!)
+                    dockBackdrop?.alpha = 0f
                     AppLauncherEngine.launchDockApp(this@EdgeOverlayService, entry)
+                    mainHandler.postDelayed({ closeDockPanel() }, 80L)
                 }
 
                 val glp = GridLayout.LayoutParams().apply {
@@ -623,8 +625,9 @@ class EdgeOverlayService : Service() {
                 )
                 setOnClickListener {
                     vibrateLight(10L)
-                    closeDockPanel()
+                    dockBackdrop?.alpha = 0f
                     AppLauncherEngine.dismissActiveDockApp(this@EdgeOverlayService)
+                    mainHandler.postDelayed({ closeDockPanel() }, 80L)
                 }
             }
             footer.addView(
@@ -644,8 +647,9 @@ class EdgeOverlayService : Service() {
             )
             setOnClickListener {
                 vibrateLight(8L)
-                closeDockPanel()
+                dockBackdrop?.alpha = 0f
                 openSettingsActivity()
+                mainHandler.postDelayed({ closeDockPanel() }, 80L)
             }
         }
         footer.addView(settingsBtn, LinearLayout.LayoutParams(dp(34f), dp(30f)))

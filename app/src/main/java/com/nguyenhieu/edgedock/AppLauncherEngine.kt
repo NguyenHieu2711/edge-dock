@@ -1,7 +1,10 @@
 package com.nguyenhieu.edgedock
 
+import android.app.ActivityOptions
+import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.os.Build
 import android.widget.Toast
 
 object AppLauncherEngine {
@@ -55,13 +58,40 @@ object AppLauncherEngine {
     }
 
     private fun launchNativeIntent(context: Context, baseIntent: Intent) {
-        try {
-            val intent = Intent(baseIntent).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            context.startActivity(intent)
-        } catch (_: Throwable) {
+        val intent = Intent(baseIntent).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
+        }
+        if (!startIntentSafely(context, intent)) {
             Toast.makeText(context, "Không thể mở ứng dụng này", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun startIntentSafely(context: Context, intent: Intent): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            try {
+                val opts = ActivityOptions.makeBasic().apply {
+                    setPendingIntentBackgroundActivityStartMode(
+                        ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED
+                    )
+                }.toBundle()
+                val reqCode = (intent.component?.flattenToShortString() ?: intent.`package` ?: "dock").hashCode()
+                val pi = PendingIntent.getActivity(
+                    context,
+                    reqCode,
+                    intent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+                    opts
+                )
+                pi.send(context, 0, null, null, null, null, opts)
+                return true
+            } catch (_: Throwable) {
+            }
+        }
+        return try {
+            context.startActivity(intent)
+            true
+        } catch (_: Throwable) {
+            false
         }
     }
 
@@ -98,24 +128,16 @@ object AppLauncherEngine {
     }
 
     private fun bringPackageToFront(context: Context, pkg: String): Boolean {
-        return try {
-            val launch = DockAppCache.getLaunchIntent(context, pkg) ?: return false
-            launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            context.startActivity(launch)
-            true
-        } catch (_: Throwable) {
-            false
-        }
+        val launch = DockAppCache.getLaunchIntent(context, pkg) ?: return false
+        launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
+        return startIntentSafely(context, launch)
     }
 
     private fun goHomeViaIntent(context: Context) {
-        try {
-            val home = Intent(Intent.ACTION_MAIN).apply {
-                addCategory(Intent.CATEGORY_HOME)
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            context.startActivity(home)
-        } catch (_: Throwable) {
+        val home = Intent(Intent.ACTION_MAIN).apply {
+            addCategory(Intent.CATEGORY_HOME)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
+        startIntentSafely(context, home)
     }
 }
