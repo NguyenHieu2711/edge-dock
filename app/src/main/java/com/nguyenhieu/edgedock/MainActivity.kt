@@ -862,6 +862,34 @@ class MainActivity : AppCompatActivity() {
     // =========================================================================
     // GITHUB IN-APP APK SELF-UPDATER (SHA BYPASS CDN + ONRESUME + 600ms POLL)
     // =========================================================================
+    private fun fetchFromGithubWebRedirect(): Pair<String, String>? {
+        val url = "https://github.com/$GITHUB_REPO/releases/latest?t=${System.currentTimeMillis()}"
+        var conn: HttpURLConnection? = null
+        return try {
+            conn = (URL(url).openConnection() as HttpURLConnection).apply {
+                requestMethod = "HEAD"
+                instanceFollowRedirects = false
+                connectTimeout = 4500
+                readTimeout = 4500
+                setRequestProperty("Cache-Control", "no-cache")
+                setRequestProperty("User-Agent", "EdgeDock-Android/${BuildConfig.VERSION_NAME}")
+            }
+            val code = conn.responseCode
+            val loc = conn.getHeaderField("Location")?.trim().orEmpty()
+            if (code in 300..399 && loc.contains("/releases/tag/")) {
+                val tag = loc.substringAfter("/releases/tag/").substringBefore("?").substringBefore("#").trim()
+                if (tag.isNotEmpty()) {
+                    return Pair(tag, "https://github.com/$GITHUB_REPO/releases/download/$tag/edge-dock-$tag.apk")
+                }
+            }
+            null
+        } catch (_: Throwable) {
+            null
+        } finally {
+            conn?.disconnect()
+        }
+    }
+
     private fun checkForUpdate(manual: Boolean) {
         if (activeDownloadId != -1L) return
         if (!manual) {
@@ -870,13 +898,16 @@ class MainActivity : AppCompatActivity() {
             lastAutoCheckAt = now
         }
         netExecutor.execute {
-            val manifest = fetchLatestManifest()
-            var releaseInfo: Pair<String, String>? = if (manifest != null) {
-                val t = manifest.optString("tag_name", "").trim()
-                val u = manifest.optString("apk_url", "").trim()
-                if (t.isNotEmpty() && u.isNotEmpty()) Pair(t, u) else null
-            } else {
-                null
+            var releaseInfo: Pair<String, String>? = fetchFromGithubWebRedirect()
+            if (releaseInfo == null) {
+                val manifest = fetchLatestManifest()
+                releaseInfo = if (manifest != null) {
+                    val t = manifest.optString("tag_name", "").trim()
+                    val u = manifest.optString("apk_url", "").trim()
+                    if (t.isNotEmpty() && u.isNotEmpty()) Pair(t, u) else null
+                } else {
+                    null
+                }
             }
             if (releaseInfo == null) {
                 releaseInfo = fetchFromGitHubReleasesApi()
@@ -895,7 +926,7 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
                 if (manual) {
-                    val msg = if (releaseInfo == null && manifest == null) {
+                    val msg = if (releaseInfo == null) {
                         "Không thể kiểm tra cập nhật lúc này."
                     } else {
                         "Đang ở bản mới nhất (v${BuildConfig.VERSION_NAME})."
