@@ -9,12 +9,10 @@ import android.widget.Toast
 object AppLauncherEngine {
 
     private val mainHandler = Handler(Looper.getMainLooper())
-    @Volatile
-    private var dismissSeq: Int = 0
 
     /**
-     * Captures the exact foreground app (e.g. YouTube) + its integer taskId right when the user
-     * starts swiping the Edge Handle, BEFORE the Dock Panel opens on top of it!
+     * Captures the exact foreground app (e.g. YouTube) immediately on Edge touch,
+     * using non-blocking Accessibility + lightweight Shizuku task check.
      */
     fun captureUnderlyingAppSnapshot(context: Context) {
         if (DockSessionTracker.isSessionActive()) return
@@ -41,7 +39,6 @@ object AppLauncherEngine {
     }
 
     fun launchDockApp(context: Context, entry: DockAppEntry) {
-        dismissSeq++
         val launchIntent = DockAppCache.getLaunchIntent(context, entry.packageName)
         if (launchIntent == null) {
             Toast.makeText(context, "Không tìm thấy ${entry.label}", Toast.LENGTH_SHORT).show()
@@ -73,7 +70,7 @@ object AppLauncherEngine {
             fromHome = isFromHome
         )
 
-        // FAST-PATH (0-RELOAD RESUME!): Bring existing RAM taskId to front in normal fullscreen mode!
+        // When keepAlive is ON & Shizuku is ready, resume existing taskId in RAM (zero reload)
         if (shizukuReady && entry.keepAlive) {
             val knownTid = DockSessionTracker.getKnownDockTaskId(entry.packageName)
             ShizukuBridge.resumeExistingPackageTaskAsync(
@@ -102,15 +99,13 @@ object AppLauncherEngine {
     ) {
         launchNativeIntent(context, launchIntent, hideRecents)
 
+        // Wait 850ms so Android 14 Shell Transition finishes completely BEFORE querying taskId!
         if (ShizukuBridge.isReadyCached) {
             mainHandler.postDelayed({
-                ShizukuBridge.captureAndHideTaskAsync(context, pkg, hideRecents) { tid ->
-                    if (tid > 0) {
-                        DockSessionTracker.rememberDockTaskId(pkg, tid)
-                        ShizukuBridge.setTaskFullscreenAsync(context, tid)
-                    }
+                ShizukuBridge.captureTaskIdAsync(context, pkg) { tid ->
+                    if (tid > 0) DockSessionTracker.rememberDockTaskId(pkg, tid)
                 }
-            }, 300L)
+            }, 850L)
         }
     }
 
@@ -130,94 +125,56 @@ object AppLauncherEngine {
     }
 
     /**
-     * One-tap or quick-swipe dismiss on the dim Edge Handle:
-     * - Restores YouTube's EXACT taskId (NEVER closes YouTube or throws to Home!)
-     * - Keeps the Dock app alive & hidden in RAM if keepAlive == true (0ms zero-reload next open!)
-     * - Force-stops the Dock app via Shizuku if keepAlive == false.
+     * Safe, deadlock-free return to main app (e.g. YouTube):
+     * - Always uses clean standard Intent / Home / Back FIRST (0ms, zero Shell Transition lock even mid-load!)
+     * - If keepAlive == false: waits 550ms until transition finishes before executing force-stop.
      */
     fun dismissActiveDockApp(context: Context) {
-        val myDismissSeq = ++dismissSeq
         val dockPkg = DockSessionTracker.activeDockPackage
         val returnPkg = DockSessionTracker.returnTargetPackage
         val returnTid = DockSessionTracker.returnTargetTaskId
         val wasHome = DockSessionTracker.returnWasHome
-        val elapsedSinceLaunch = System.currentTimeMillis() - DockSessionTracker.sessionStartedAt
 
         DockSessionTracker.clearSession()
 
         val entry = dockPkg?.let { p -> DockAppCache.getPinnedApps(context).firstOrNull { it.packageName == p } }
         val keepAlive = entry?.keepAlive ?: true
-        val hideRecents = DockPrefs.isHideFromRecents(context)
         val shizukuReady = ShizukuBridge.isReadyCached
 
-        val bringTargetBackNow: () -> Unit = {
-            if (wasHome) {
-                val acc = EdgeDockAccessibilityService.instance
-                if (acc == null || !acc.goHome()) goHomeViaIntent(context)
-            } else if (shizukuReady && (returnTid > 0 || !returnPkg.isNullOrBlank())) {
+        // 1. Bring YouTube back via standard Android Intent first (immune to Shell Transition deadlock!)
+        var restoredViaIntent = false
+        if (wasHome) {
+            val acc = EdgeDockAccessibilityService.instance
+            if (acc == null || !acc.goHome()) goHomeViaIntent(context)
+            restoredViaIntent = true
+        } else if (!returnPkg.isNullOrBlank()) {
+            restoredViaIntent = bringPackageToFront(context, returnPkg)
+        }
+
+        // 2. Fallback via Shizuku or Accessibility Home if standard Intent failed
+        if (!restoredViaIntent) {
+            if (shizukuReady && (returnTid > 0 || !returnPkg.isNullOrBlank())) {
                 ShizukuBridge.moveTaskOrPackageToFrontAsync(context, returnTid, returnPkg) { moved ->
-                    if (!moved) restoreViaIntentOrHome(context, returnPkg)
+                    if (!moved) goHomeOrBackFallback(context)
                 }
             } else {
-                restoreViaIntentOrHome(context, returnPkg)
+                goHomeOrBackFallback(context)
             }
         }
 
-        val afterRestore: () -> Unit = {
-            if (!dockPkg.isNullOrBlank() && shizukuReady) {
-                if (!keepAlive) {
-                    DockSessionTracker.forgetDockTaskId(dockPkg)
-                    mainHandler.postDelayed({
-                        ShizukuBridge.execAsync(context, "am force-stop '$dockPkg'")
-                    }, 160L)
-                } else if (hideRecents) {
-                    val dockTid = DockSessionTracker.getKnownDockTaskId(dockPkg)
-                    mainHandler.postDelayed({
-                        ShizukuBridge.captureAndHideTaskAsync(context, dockPkg, true) { tid ->
-                            if (tid > 0) DockSessionTracker.rememberDockTaskId(dockPkg, tid)
-                            else if (dockTid > 0) DockSessionTracker.rememberDockTaskId(dockPkg, dockTid)
-                        }
-                    }, 120L)
-                }
-            }
-
-            // ANTI-SPLASH RE-SURGE GUARD:
-            // If user tapped X while the dock app was still mid-loading (e.g. SplashActivity -> MainActivity),
-            // guard at +320ms and +750ms: if that dismissed app popped back on top, immediately pull YouTube back up!
-            if (keepAlive && !dockPkg.isNullOrBlank() && elapsedSinceLaunch < 4500L) {
-                val guardDelays = longArrayOf(320L, 750L)
-                for (delayMs in guardDelays) {
-                    mainHandler.postDelayed({
-                        if (dismissSeq != myDismissSeq || DockSessionTracker.isSessionActive()) return@postDelayed
-                        val currentTop = EdgeDockAccessibilityService.instance?.detectTopAppPackageNow()
-                        if (currentTop == dockPkg) {
-                            bringTargetBackNow()
-                        } else if (currentTop == null && shizukuReady) {
-                            val ignoreCsv = "${context.packageName},com.android.systemui,android"
-                            ShizukuBridge.getTopTaskAsync(context, ignoreCsv) { _, pkg ->
-                                if (dismissSeq == myDismissSeq && !DockSessionTracker.isSessionActive() && pkg == dockPkg) {
-                                    bringTargetBackNow()
-                                }
-                            }
-                        }
-                    }, delayMs)
-                }
-            }
+        // 3. Only if Keep-Alive is OFF, wait 550ms for window transition to settle then force-stop cleanly
+        if (!dockPkg.isNullOrBlank() && shizukuReady && !keepAlive) {
+            DockSessionTracker.forgetDockTaskId(dockPkg)
+            mainHandler.postDelayed({
+                ShizukuBridge.execAsync(context, "am force-stop '$dockPkg'")
+            }, 550L)
         }
-
-        bringTargetBackNow()
-        afterRestore()
     }
 
-    private fun restoreViaIntentOrHome(context: Context, returnPkg: String?) {
-        if (!returnPkg.isNullOrBlank() && bringPackageToFront(context, returnPkg)) {
-            return
-        }
+    private fun goHomeOrBackFallback(context: Context) {
         val acc = EdgeDockAccessibilityService.instance
         if (acc != null) {
-            if (!acc.goHome()) {
-                goHomeViaIntent(context)
-            }
+            if (!acc.goHome()) goHomeViaIntent(context)
         } else {
             goHomeViaIntent(context)
         }

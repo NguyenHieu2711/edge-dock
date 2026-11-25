@@ -436,7 +436,15 @@ class EdgeOverlayService : Service() {
                     }
                     true
                 }
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                MotionEvent.ACTION_CANCEL -> {
+                    mainHandler.removeCallbacks(longPressRunnable)
+                    if (dragMode) {
+                        dragMode = false
+                        updateHandleAppearance()
+                    }
+                    true
+                }
+                MotionEvent.ACTION_UP -> {
                     mainHandler.removeCallbacks(longPressRunnable)
                     if (dragMode) {
                         dragMode = false
@@ -704,6 +712,10 @@ class EdgeOverlayService : Service() {
         dockBackdrop = null
         dockOpen = false
         try {
+            bd.clearAnimation()
+            for (i in 0 until bd.childCount) {
+                bd.getChildAt(i)?.animate()?.cancel()
+            }
             wm.removeViewImmediate(bd)
         } catch (_: Throwable) {
             try {

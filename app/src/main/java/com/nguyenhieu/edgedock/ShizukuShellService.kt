@@ -159,11 +159,7 @@ class ShizukuShellService : IShizukuShellService.Stub() {
         }
 
         // 2. Recent tasks WITH ActivityManager.RECENT_WITH_EXCLUDED (0x0001)
-        val recentTid = findInRecentTasksWithExcluded(target)
-        if (recentTid > 0) return recentTid
-
-        // 3. Hard shell fallback via dumpsys activity recents
-        return findTaskIdViaDumpsys(target)
+        return findInRecentTasksWithExcluded(target)
     }
 
     @Suppress("UNCHECKED_CAST")

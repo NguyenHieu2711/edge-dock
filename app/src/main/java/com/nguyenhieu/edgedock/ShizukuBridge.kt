@@ -251,18 +251,13 @@ object ShizukuBridge {
                         resolvedTid = svc.findTaskIdForPackage(packageName)
                     }
                     if (resolvedTid > 0) {
-                        svc.setTaskFullscreen(resolvedTid)
                         ok = svc.moveTaskToFront(resolvedTid)
                         if (!ok) {
                             val freshTid = svc.findTaskIdForPackage(packageName)
                             if (freshTid > 0 && freshTid != resolvedTid) {
                                 resolvedTid = freshTid
-                                svc.setTaskFullscreen(resolvedTid)
                                 ok = svc.moveTaskToFront(resolvedTid)
                             }
-                        }
-                        if (ok && excludeFromRecents) {
-                            svc.setTaskExcludedFromRecents(resolvedTid, true)
                         }
                     }
                 }
@@ -274,10 +269,9 @@ object ShizukuBridge {
         }
     }
 
-    fun captureAndHideTaskAsync(
+    fun captureTaskIdAsync(
         context: Context,
         packageName: String,
-        excludeFromRecents: Boolean,
         onCaptured: (Int) -> Unit
     ) {
         val ctx = context.applicationContext
@@ -287,9 +281,6 @@ object ShizukuBridge {
                 val svc = awaitService(ctx)
                 if (svc != null) {
                     tid = svc.findTaskIdForPackage(packageName)
-                    if (tid > 0 && excludeFromRecents) {
-                        svc.setTaskExcludedFromRecents(tid, true)
-                    }
                 }
             } catch (_: Throwable) {
                 shellService = null
