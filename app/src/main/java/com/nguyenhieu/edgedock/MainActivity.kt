@@ -70,7 +70,7 @@ class MainActivity : AppCompatActivity() {
     private var activeUpdateApkFile: File? = null
     private var pendingInstallApkFile: File? = null
     private var mandatoryUpdateDialog: AlertDialog? = null
-    private var updatePromptDismissedThisSession = false
+    private var autoTriggeredUpdateTag: String = ""
     private var lastAutoCheckAt: Long = 0L
     private var downloadPollRunnable: Runnable? = null
 
@@ -863,6 +863,7 @@ class MainActivity : AppCompatActivity() {
     // GITHUB IN-APP APK SELF-UPDATER (SHA BYPASS CDN + ONRESUME + 600ms POLL)
     // =========================================================================
     private fun checkForUpdate(manual: Boolean) {
+        if (activeDownloadId != -1L) return
         if (!manual) {
             val now = System.currentTimeMillis()
             if (now - lastAutoCheckAt < 5000L) return
@@ -886,8 +887,9 @@ class MainActivity : AppCompatActivity() {
                 if (releaseInfo != null) {
                     val (tag, apkUrl) = releaseInfo
                     if (isNewerVersion(tag, BuildConfig.VERSION_NAME)) {
-                        if (manual || !updatePromptDismissedThisSession) {
-                            showMandatoryUpdateDialog(tag, apkUrl)
+                        if (manual || autoTriggeredUpdateTag != tag) {
+                            autoTriggeredUpdateTag = tag
+                            triggerImmediateApkUpdate(tag, apkUrl)
                         }
                         return@post
                     }
@@ -993,56 +995,27 @@ class MainActivity : AppCompatActivity() {
         return false
     }
 
-    private fun showMandatoryUpdateDialog(tagName: String, apkUrl: String) {
+    private fun triggerImmediateApkUpdate(tagName: String, apkUrl: String) {
         if (isFinishing || isDestroyed) return
-        mandatoryUpdateDialog?.let { if (it.isShowing) return }
-
+        val safeTag = tagName.replace(Regex("[^a-zA-Z0-9._-]"), "_")
         val existingApk = activeUpdateApkFile
-        if (existingApk != null && existingApk.exists() && existingApk.name.contains(tagName, ignoreCase = true)) {
-            val ready = AlertDialog.Builder(this)
-                .setTitle("Cập nhật mới ($tagName)")
-                .setMessage("Bản $tagName đã tải xong. Bấm Cài đặt ngay để cập nhật.")
-                .setCancelable(true)
-                .setPositiveButton("Cài đặt ngay") { _, _ ->
-                    mandatoryUpdateDialog = null
-                    promptInstallApk(existingApk)
-                }
-                .setNegativeButton("Để sau") { d, _ ->
-                    updatePromptDismissedThisSession = true
-                    mandatoryUpdateDialog = null
-                    d.dismiss()
-                }
-                .create()
-            mandatoryUpdateDialog = ready
-            ready.show()
+        if (existingApk != null && existingApk.exists() && existingApk.name.contains(safeTag, ignoreCase = true)) {
+            mandatoryUpdateDialog?.dismiss()
+            mandatoryUpdateDialog = null
+            promptInstallApk(existingApk)
             return
         }
-
-        val dialog = AlertDialog.Builder(this)
-            .setTitle("Có bản cập nhật mới ($tagName)")
-            .setMessage("Phiên bản $tagName đã sẵn sàng (hiện tại: v${BuildConfig.VERSION_NAME}).")
-            .setCancelable(true)
-            .setPositiveButton("Cập nhật ngay") { _, _ ->
-                showDownloadingLockDialog(tagName)
-                downloadAndInstallApk(tagName, apkUrl)
-            }
-            .setNegativeButton("Để sau") { d, _ ->
-                updatePromptDismissedThisSession = true
-                mandatoryUpdateDialog = null
-                d.dismiss()
-            }
-            .create()
-        mandatoryUpdateDialog = dialog
-        dialog.show()
+        showDownloadingLockDialog(tagName)
+        downloadAndInstallApk(tagName, apkUrl)
     }
 
     private fun showDownloadingLockDialog(tagName: String) {
         if (isFinishing || isDestroyed) return
-        mandatoryUpdateDialog?.dismiss()
+        mandatoryUpdateDialog?.let { if (it.isShowing) return }
         val progress = AlertDialog.Builder(this)
-            .setTitle("Đang tải bản cập nhật $tagName...")
-            .setMessage("Vui lòng chờ giây lát, gói cài đặt sẽ tự động bật lên ngay khi tải xong.")
-            .setCancelable(false)
+            .setTitle("Đang tự cập nhật lên $tagName...")
+            .setMessage("Đang tải gói cài đặt, bộ cài đặt sẽ tự bật lên ngay khi tải xong.")
+            .setCancelable(true)
             .create()
         mandatoryUpdateDialog = progress
         progress.show()
@@ -1073,6 +1046,7 @@ class MainActivity : AppCompatActivity() {
                         DownloadManager.STATUS_FAILED -> {
                             installTriggeredForId = downloadId
                             activeDownloadId = -1L
+                            autoTriggeredUpdateTag = ""
                             stopDownloadPoll()
                             mandatoryUpdateDialog?.dismiss()
                             mandatoryUpdateDialog = null
@@ -1117,6 +1091,8 @@ class MainActivity : AppCompatActivity() {
             downloadPollRunnable = r
             mainHandler.postDelayed(r, 600L)
         } catch (e: Throwable) {
+            activeDownloadId = -1L
+            autoTriggeredUpdateTag = ""
             stopDownloadPoll()
             mandatoryUpdateDialog?.dismiss()
             mandatoryUpdateDialog = null
