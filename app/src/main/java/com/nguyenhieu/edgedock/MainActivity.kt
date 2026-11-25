@@ -60,7 +60,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var masterSwitch: Switch
     private lateinit var statusOverlayBadge: TextView
     private lateinit var statusAccessBadge: TextView
-    private lateinit var statusShizukuBadge: TextView
     private lateinit var appsContainer: LinearLayout
     private lateinit var sideLeftBtn: TextView
     private lateinit var sideRightBtn: TextView
@@ -74,10 +73,6 @@ class MainActivity : AppCompatActivity() {
     private var lastAutoCheckAt: Long = 0L
     private var downloadPollRunnable: Runnable? = null
 
-    private val shizukuListener: () -> Unit = {
-        refreshStatusBadges()
-    }
-
     private val downloadReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action != DownloadManager.ACTION_DOWNLOAD_COMPLETE) return
@@ -90,8 +85,6 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        ShizukuBridge.init(this)
-        ShizukuBridge.addStatusListener(shizukuListener)
         DockAppCache.warmUp(this)
         DockAppCache.loadInstalledAppsAsync(this) {}
 
@@ -138,7 +131,6 @@ class MainActivity : AppCompatActivity() {
         stopDownloadPoll()
         mandatoryUpdateDialog?.dismiss()
         mandatoryUpdateDialog = null
-        ShizukuBridge.removeStatusListener(shizukuListener)
         try {
             unregisterReceiver(downloadReceiver)
         } catch (_: Throwable) {
@@ -234,10 +226,6 @@ class MainActivity : AppCompatActivity() {
         statusAccessBadge = addStatusRow(permCard, "Quay về app cũ (Accessibility)", false) {
             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
         }
-        addDivider(permCard)
-        statusShizukuBadge = addStatusRow(permCard, "Shizuku (Chạy ngầm & Ẩn tab)", false) {
-            handleShizukuAction()
-        }
         rootList.addView(permCard, cardLp())
 
         // 3. Pinned Apps Card
@@ -304,11 +292,6 @@ class MainActivity : AppCompatActivity() {
             background = cardBg()
             setPadding(dp(14f), dp(8f), dp(14f), dp(12f))
         }
-
-        addToggleRow(cfgCard, "Ẩn khỏi Đa nhiệm (chỉ app tắt ngầm)", DockPrefs.isHideFromRecents(this)) { on ->
-            DockPrefs.setHideFromRecents(this, on)
-        }
-        addDivider(cfgCard)
 
         val sideRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -506,13 +489,6 @@ class MainActivity : AppCompatActivity() {
 
         val accOk = EdgeDockAccessibilityService.isEnabled(this)
         styleBadge(statusAccessBadge, if (accOk) "Đã bật" else "Cấp quyền", accOk)
-
-        when (ShizukuBridge.getStatus(this)) {
-            ShizukuBridge.Status.READY -> styleBadge(statusShizukuBadge, "Sẵn sàng", ok = true)
-            ShizukuBridge.Status.NEED_PERMISSION -> styleBadge(statusShizukuBadge, "Cấp quyền", ok = false, warn = true)
-            ShizukuBridge.Status.NOT_RUNNING -> styleBadge(statusShizukuBadge, "Mở Shizuku", ok = false, warn = true)
-            ShizukuBridge.Status.NOT_INSTALLED -> styleBadge(statusShizukuBadge, "Chưa cài", ok = false)
-        }
     }
 
     private fun refreshSideButtons() {
@@ -542,31 +518,6 @@ class MainActivity : AppCompatActivity() {
         } else {
             DockPrefs.setDockEnabled(this, false)
             EdgeOverlayService.stop(this)
-        }
-    }
-
-    private fun handleShizukuAction() {
-        when (ShizukuBridge.getStatus(this)) {
-            ShizukuBridge.Status.READY -> {
-                ShizukuBridge.getDiagnosticInfoAsync(this) { info ->
-                    Toast.makeText(this, "Shizuku: $info", Toast.LENGTH_LONG).show()
-                }
-            }
-            ShizukuBridge.Status.NEED_PERMISSION -> ShizukuBridge.requestPermission()
-            ShizukuBridge.Status.NOT_RUNNING -> {
-                val launch = packageManager.getLaunchIntentForPackage("moe.shizuku.privileged.api")
-                if (launch != null) startActivity(launch)
-                else Toast.makeText(this, "Mở app Shizuku và bấm Start", Toast.LENGTH_LONG).show()
-            }
-            ShizukuBridge.Status.NOT_INSTALLED -> {
-                try {
-                    startActivity(
-                        Intent(Intent.ACTION_VIEW, Uri.parse("https://play.google.com/store/apps/details?id=moe.shizuku.privileged.api"))
-                    )
-                } catch (_: Throwable) {
-                    Toast.makeText(this, "Cài Shizuku từ CH Play", Toast.LENGTH_LONG).show()
-                }
-            }
         }
     }
 
@@ -616,32 +567,6 @@ class MainActivity : AppCompatActivity() {
                 ellipsize = TextUtils.TruncateAt.END
             }
             row.addView(nameTv, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-
-            val bgPill = TextView(this).apply {
-                text = if (entry.keepAlive) "Ngầm · Bật" else "Ngầm · Tắt"
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
-                typeface = Typeface.DEFAULT_BOLD
-                setTextColor(Color.parseColor(if (entry.keepAlive) "#38BDF8" else "#94A3B8"))
-                background = GradientDrawable().apply {
-                    setColor(Color.parseColor(if (entry.keepAlive) "#163143" else "#262C3B"))
-                    setStroke(dp(1f).coerceAtLeast(1), Color.parseColor(if (entry.keepAlive) "#38BDF8" else "#334155"))
-                    cornerRadius = dp(99f).toFloat()
-                }
-                setPadding(dp(9f), dp(4f), dp(9f), dp(4f))
-                setOnClickListener {
-                    DockPrefs.toggleKeepAlive(this@MainActivity, entry.packageName)
-                    DockAppCache.invalidatePinnedApps(this@MainActivity)
-                    renderPinnedAppsList()
-                    EdgeOverlayService.refresh(this@MainActivity)
-                }
-            }
-            row.addView(
-                bgPill,
-                LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
-                    marginStart = dp(6f)
-                    marginEnd = dp(4f)
-                }
-            )
 
             // Flat Vector Battery/Settings shortcut (replaces emoji)
             row.addView(

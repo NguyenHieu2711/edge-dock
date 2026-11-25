@@ -2,17 +2,13 @@ package com.nguyenhieu.edgedock
 
 import android.content.Context
 import android.content.Intent
-import android.os.Handler
-import android.os.Looper
 import android.widget.Toast
 
 object AppLauncherEngine {
 
-    private val mainHandler = Handler(Looper.getMainLooper())
-
     /**
-     * Captures the exact foreground app (e.g. YouTube) immediately on Edge touch,
-     * using non-blocking Accessibility + lightweight Shizuku task check.
+     * Captures the exact foreground app (e.g. YouTube) immediately on Edge touch
+     * using non-blocking Accessibility window inspection (zero Shizuku dependency).
      */
     fun captureUnderlyingAppSnapshot(context: Context) {
         if (DockSessionTracker.isSessionActive()) return
@@ -24,17 +20,6 @@ object AppLauncherEngine {
             val isHome = accPkg in homePkgs
             DockSessionTracker.savePreOpenSnapshot(accPkg, -1, isHome)
             if (!isHome) DockAppCache.warmLaunchIntentAsync(context, accPkg)
-        }
-
-        if (ShizukuBridge.isReadyCached) {
-            val ignoreCsv = "${context.packageName},com.android.systemui,android"
-            ShizukuBridge.getTopTaskAsync(context, ignoreCsv) { tid, pkg ->
-                if (pkg.isNotBlank() && pkg != context.packageName) {
-                    val isHome = pkg in homePkgs
-                    DockSessionTracker.savePreOpenSnapshot(pkg, tid, isHome)
-                    if (!isHome) DockAppCache.warmLaunchIntentAsync(context, pkg)
-                }
-            }
         }
     }
 
@@ -49,7 +34,6 @@ object AppLauncherEngine {
         val snapPkg = DockSessionTracker.snapshotUnderlyingPackage
             ?: EdgeDockAccessibilityService.instance?.detectTopAppPackageNow()
             ?: DockSessionTracker.currentForegroundPackage
-        val snapTid = DockSessionTracker.snapshotUnderlyingTaskId
 
         val isFromHome = !snapPkg.isNullOrBlank() && snapPkg in homePkgs
         val prevTarget = if (!snapPkg.isNullOrBlank() && !isFromHome && snapPkg != entry.packageName && snapPkg != context.packageName) {
@@ -60,66 +44,20 @@ object AppLauncherEngine {
             DockAppCache.warmLaunchIntentAsync(context, prevTarget)
         }
 
-        val shizukuReady = ShizukuBridge.isReadyCached
-        // IMPORTANT: FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS prevents Android from matching & resuming existing
-        // background tasks (causing reload every reopen), so never apply it when keepAlive=true!
-        val applyExcludeRecents = DockPrefs.isHideFromRecents(context) && !entry.keepAlive
-
         DockSessionTracker.startSession(
             dockPkg = entry.packageName,
             previousPkg = prevTarget,
-            previousTaskId = if (prevTarget != null) snapTid else -1,
+            previousTaskId = -1,
             fromHome = isFromHome
         )
 
-        // When keepAlive is ON & Shizuku is ready, resume existing taskId in RAM (zero reload)
-        if (shizukuReady && entry.keepAlive) {
-            val knownTid = DockSessionTracker.getKnownDockTaskId(entry.packageName)
-            ShizukuBridge.resumeExistingPackageTaskAsync(
-                context = context,
-                packageName = entry.packageName,
-                knownTaskId = knownTid,
-                excludeFromRecents = false
-            ) { resumed, resolvedTid ->
-                if (resumed) {
-                    if (resolvedTid > 0) DockSessionTracker.rememberDockTaskId(entry.packageName, resolvedTid)
-                } else {
-                    launchColdAndTrackTask(context, entry.packageName, launchIntent, false)
-                }
-            }
-            return
-        }
-
-        launchColdAndTrackTask(context, entry.packageName, launchIntent, applyExcludeRecents)
+        launchNativeIntent(context, launchIntent)
     }
 
-    private fun launchColdAndTrackTask(
-        context: Context,
-        pkg: String,
-        launchIntent: Intent,
-        hideRecents: Boolean
-    ) {
-        launchNativeIntent(context, launchIntent, hideRecents)
-
-        // Wait for Android 14 Shell Transition & slow Splash->Main transitions, then record taskId
-        if (ShizukuBridge.isReadyCached) {
-            for (delayMs in longArrayOf(850L, 2100L)) {
-                mainHandler.postDelayed({
-                    ShizukuBridge.captureTaskIdAsync(context, pkg) { tid ->
-                        if (tid > 0) DockSessionTracker.rememberDockTaskId(pkg, tid)
-                    }
-                }, delayMs)
-            }
-        }
-    }
-
-    private fun launchNativeIntent(context: Context, baseIntent: Intent, hideRecents: Boolean) {
+    private fun launchNativeIntent(context: Context, baseIntent: Intent) {
         try {
             val intent = Intent(baseIntent).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                if (hideRecents) {
-                    addFlags(Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS)
-                }
             }
             context.startActivity(intent)
         } catch (_: Throwable) {
@@ -128,49 +66,25 @@ object AppLauncherEngine {
     }
 
     /**
-     * Safe, deadlock-free return to main app (e.g. YouTube):
-     * - Always uses clean standard Intent / Home / Back FIRST (0ms, zero Shell Transition lock even mid-load!)
-     * - If keepAlive == false: waits 550ms until transition finishes before executing force-stop.
+     * Fast, zero-Shizuku return to main app (e.g. YouTube) or Home screen.
      */
     fun dismissActiveDockApp(context: Context) {
-        val dockPkg = DockSessionTracker.activeDockPackage
         val returnPkg = DockSessionTracker.returnTargetPackage
-        val returnTid = DockSessionTracker.returnTargetTaskId
         val wasHome = DockSessionTracker.returnWasHome
 
         DockSessionTracker.clearSession()
 
-        val entry = dockPkg?.let { p -> DockAppCache.getPinnedApps(context).firstOrNull { it.packageName == p } }
-        val keepAlive = entry?.keepAlive ?: true
-        val shizukuReady = ShizukuBridge.isReadyCached
-
-        // 1. Bring YouTube back via standard Android Intent first (immune to Shell Transition deadlock!)
-        var restoredViaIntent = false
+        var restored = false
         if (wasHome) {
             val acc = EdgeDockAccessibilityService.instance
             if (acc == null || !acc.goHome()) goHomeViaIntent(context)
-            restoredViaIntent = true
+            restored = true
         } else if (!returnPkg.isNullOrBlank()) {
-            restoredViaIntent = bringPackageToFront(context, returnPkg)
+            restored = bringPackageToFront(context, returnPkg)
         }
 
-        // 2. Fallback via Shizuku or Accessibility Home if standard Intent failed
-        if (!restoredViaIntent) {
-            if (shizukuReady && (returnTid > 0 || !returnPkg.isNullOrBlank())) {
-                ShizukuBridge.moveTaskOrPackageToFrontAsync(context, returnTid, returnPkg) { moved ->
-                    if (!moved) goHomeOrBackFallback(context)
-                }
-            } else {
-                goHomeOrBackFallback(context)
-            }
-        }
-
-        // 3. Only if Keep-Alive is OFF, wait 550ms for window transition to settle then force-stop cleanly
-        if (!dockPkg.isNullOrBlank() && shizukuReady && !keepAlive) {
-            DockSessionTracker.forgetDockTaskId(dockPkg)
-            mainHandler.postDelayed({
-                ShizukuBridge.execAsync(context, "am force-stop '$dockPkg'")
-            }, 550L)
+        if (!restored) {
+            goHomeOrBackFallback(context)
         }
     }
 

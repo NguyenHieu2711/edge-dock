@@ -118,22 +118,6 @@ class EdgeOverlayService : Service() {
                             return
                         }
                     }
-                } else if (ShizukuBridge.isReadyCached) {
-                    val ignoreCsv = "$packageName,com.android.systemui,android"
-                    ShizukuBridge.getTopTaskAsync(this@EdgeOverlayService, ignoreCsv) { _, topPkg ->
-                        val curActive = DockSessionTracker.activeDockPackage
-                        if (curActive != null && topPkg.isNotBlank()) {
-                            if (topPkg == curActive) {
-                                DockSessionTracker.markActiveAppVisible(curActive)
-                                watchdogMissCount = 0
-                            } else {
-                                watchdogMissCount++
-                                if (watchdogMissCount >= 2) {
-                                    DockSessionTracker.clearSession()
-                                }
-                            }
-                        }
-                    }
                 }
             }
             if (DockSessionTracker.isSessionActive()) {
@@ -157,7 +141,6 @@ class EdgeOverlayService : Service() {
         isRunning = true
         activeInstance = this
         wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
-        ShizukuBridge.init(this)
         DockAppCache.warmUp(this)
         DockSessionTracker.addListener(sessionListener)
         startForegroundCompat()
@@ -576,20 +559,6 @@ class EdgeOverlayService : Service() {
                     }
                 }
                 iconWrap.addView(iconView, FrameLayout.LayoutParams(dp(42f), dp(42f)))
-
-                val dot = View(this).apply {
-                    background = GradientDrawable().apply {
-                        shape = GradientDrawable.OVAL
-                        setColor(Color.parseColor(if (entry.keepAlive) "#38BDF8" else "#475569"))
-                        setStroke(dp(1.5f).coerceAtLeast(1), Color.parseColor("#181C25"))
-                    }
-                }
-                iconWrap.addView(
-                    dot,
-                    FrameLayout.LayoutParams(dp(10f), dp(10f)).apply {
-                        gravity = Gravity.BOTTOM or Gravity.END
-                    }
-                )
                 cell.addView(iconWrap, LinearLayout.LayoutParams(dp(44f), dp(44f)))
 
                 val label = TextView(this).apply {
@@ -607,17 +576,6 @@ class EdgeOverlayService : Service() {
                     vibrateLight(8L)
                     closeDockPanel()
                     AppLauncherEngine.launchDockApp(this@EdgeOverlayService, entry)
-                }
-
-                cell.setOnLongClickListener {
-                    vibrateLight(16L)
-                    val nowOn = DockPrefs.toggleKeepAlive(this@EdgeOverlayService, entry.packageName)
-                    DockAppCache.invalidatePinnedApps(this@EdgeOverlayService)
-                    val msg = if (nowOn) "Chạy ngầm BẬT · ${entry.label}" else "Chạy ngầm TẮT · ${entry.label}"
-                    Toast.makeText(this@EdgeOverlayService, msg, Toast.LENGTH_SHORT).show()
-                    closeDockPanel()
-                    openDockPanel()
-                    true
                 }
 
                 val glp = GridLayout.LayoutParams().apply {
