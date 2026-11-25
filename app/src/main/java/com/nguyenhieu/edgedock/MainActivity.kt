@@ -484,8 +484,15 @@ class MainActivity : AppCompatActivity() {
 
     private fun refreshAll() {
         val overlayOk = Settings.canDrawOverlays(this)
+        val shouldBeEnabled = DockPrefs.isDockEnabled(this) && overlayOk
+        if (shouldBeEnabled && !EdgeOverlayService.isRunning) {
+            try {
+                EdgeOverlayService.start(this)
+            } catch (_: Throwable) {
+            }
+        }
         masterSwitch.setOnCheckedChangeListener(null)
-        masterSwitch.isChecked = DockPrefs.isDockEnabled(this) && overlayOk && EdgeOverlayService.isRunning
+        masterSwitch.isChecked = shouldBeEnabled
         masterSwitch.setOnCheckedChangeListener { _, checked -> onMasterToggled(checked) }
 
         refreshStatusBadges()
