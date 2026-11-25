@@ -114,7 +114,7 @@ class EdgeOverlayService : Service() {
                     val ignoreCsv = "$packageName,com.android.systemui,android"
                     ShizukuBridge.getTopTaskAsync(this@EdgeOverlayService, ignoreCsv) { _, topPkg ->
                         val curActive = DockSessionTracker.activeDockPackage
-                        if (curActive != null && topPkg.isNotBlank() && topPkg != curActive && !DockSessionTracker.openedInPopupMode) {
+                        if (curActive != null && topPkg.isNotBlank() && topPkg != curActive) {
                             DockSessionTracker.clearSession()
                         }
                     }

@@ -36,9 +36,6 @@ object DockSessionTracker {
     var returnWasHome: Boolean = false
 
     @Volatile
-    var openedInPopupMode: Boolean = false
-
-    @Volatile
     var sessionStartedAt: Long = 0L
 
     fun isSessionActive(): Boolean = !activeDockPackage.isNullOrBlank()
@@ -88,8 +85,7 @@ object DockSessionTracker {
         dockPkg: String,
         previousPkg: String?,
         previousTaskId: Int,
-        fromHome: Boolean,
-        inPopupMode: Boolean
+        fromHome: Boolean
     ) {
         if (!isSessionActive()) {
             returnTargetPackage = previousPkg
@@ -97,7 +93,6 @@ object DockSessionTracker {
             returnWasHome = fromHome
         }
         activeDockPackage = dockPkg
-        openedInPopupMode = inPopupMode
         sessionStartedAt = System.currentTimeMillis()
         notifyStateChanged()
     }
@@ -108,7 +103,6 @@ object DockSessionTracker {
         returnTargetPackage = null
         returnTargetTaskId = -1
         returnWasHome = false
-        openedInPopupMode = false
         sessionStartedAt = 0L
         snapshotUnderlyingPackage = null
         snapshotUnderlyingTaskId = -1
@@ -121,19 +115,8 @@ object DockSessionTracker {
         val active = activeDockPackage ?: return
         val elapsed = System.currentTimeMillis() - sessionStartedAt
         if (elapsed < 550L) return
-        if (isLauncher) {
-            // User swiped to Home Screen -> clear X indicator immediately!
+        if (isLauncher || pkg != active) {
             clearSession()
-            return
-        }
-        if (pkg != active) {
-            if (openedInPopupMode) {
-                // Only keep X indicator if the popup window itself is still visibly on screen
-                val stillVisible = EdgeDockAccessibilityService.instance?.isPackageVisibleNow(active) == true
-                if (!stillVisible) clearSession()
-            } else {
-                clearSession()
-            }
         }
     }
 }

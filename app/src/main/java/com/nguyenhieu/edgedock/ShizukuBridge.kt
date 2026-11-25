@@ -251,12 +251,13 @@ object ShizukuBridge {
                         resolvedTid = svc.findTaskIdForPackage(packageName)
                     }
                     if (resolvedTid > 0) {
+                        svc.setTaskFullscreen(resolvedTid)
                         ok = svc.moveTaskToFront(resolvedTid)
                         if (!ok) {
-                            // Task ID might have changed; re-query once by packageName
                             val freshTid = svc.findTaskIdForPackage(packageName)
                             if (freshTid > 0 && freshTid != resolvedTid) {
                                 resolvedTid = freshTid
+                                svc.setTaskFullscreen(resolvedTid)
                                 ok = svc.moveTaskToFront(resolvedTid)
                             }
                         }

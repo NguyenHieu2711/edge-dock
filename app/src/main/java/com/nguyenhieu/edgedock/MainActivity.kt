@@ -229,7 +229,7 @@ class MainActivity : AppCompatActivity() {
             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
         }
         addDivider(permCard)
-        statusShizukuBadge = addStatusRow(permCard, "Shizuku (Tắt ngầm & Pop-up)", false) {
+        statusShizukuBadge = addStatusRow(permCard, "Shizuku (Chạy ngầm & Ẩn tab)", false) {
             handleShizukuAction()
         }
         rootList.addView(permCard, cardLp())
@@ -301,13 +301,6 @@ class MainActivity : AppCompatActivity() {
 
         addToggleRow(cfgCard, "Ẩn khỏi Đa nhiệm", DockPrefs.isHideFromRecents(this)) { on ->
             DockPrefs.setHideFromRecents(this, on)
-        }
-        addDivider(cfgCard)
-        addToggleRow(cfgCard, "Mở cửa sổ nổi Pop-up (Shizuku · dễ trôi icon)", DockPrefs.isPopupMode(this)) { on ->
-            DockPrefs.setPopupMode(this, on)
-            if (on && !ShizukuBridge.isReadyCached) {
-                Toast.makeText(this, "Cần bật & cấp quyền Shizuku để mở cửa sổ nổi", Toast.LENGTH_SHORT).show()
-            }
         }
         addDivider(cfgCard)
 

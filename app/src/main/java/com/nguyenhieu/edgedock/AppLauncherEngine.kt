@@ -11,8 +11,6 @@ object AppLauncherEngine {
     private val mainHandler = Handler(Looper.getMainLooper())
     @Volatile
     private var dismissSeq: Int = 0
-    // FLAG_ACTIVITY_NEW_TASK (0x10000000) | FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS (0x00800000)
-    private const val FLAGS_NEW_EXCLUDE_RECENTS = 0x10800000
 
     /**
      * Captures the exact foreground app (e.g. YouTube) + its integer taskId right when the user
@@ -66,18 +64,16 @@ object AppLauncherEngine {
         }
 
         val shizukuReady = ShizukuBridge.isReadyCached
-        val wantPopup = DockPrefs.isPopupMode(context) && shizukuReady
         val hideRecents = DockPrefs.isHideFromRecents(context)
 
         DockSessionTracker.startSession(
             dockPkg = entry.packageName,
             previousPkg = prevTarget,
             previousTaskId = if (prevTarget != null) snapTid else -1,
-            fromHome = isFromHome,
-            inPopupMode = wantPopup
+            fromHome = isFromHome
         )
 
-        // FAST-PATH (0-RELOAD RESUME!): Always bring existing RAM taskId to front first when keepAlive is ON!
+        // FAST-PATH (0-RELOAD RESUME!): Bring existing RAM taskId to front in normal fullscreen mode!
         if (shizukuReady && entry.keepAlive) {
             val knownTid = DockSessionTracker.getKnownDockTaskId(entry.packageName)
             ShizukuBridge.resumeExistingPackageTaskAsync(
@@ -89,42 +85,32 @@ object AppLauncherEngine {
                 if (resumed) {
                     if (resolvedTid > 0) DockSessionTracker.rememberDockTaskId(entry.packageName, resolvedTid)
                 } else {
-                    launchColdAndTrackTask(context, entry.packageName, launchIntent, hideRecents, wantPopup)
+                    launchColdAndTrackTask(context, entry.packageName, launchIntent, hideRecents)
                 }
             }
             return
         }
 
-        launchColdAndTrackTask(context, entry.packageName, launchIntent, hideRecents, wantPopup)
+        launchColdAndTrackTask(context, entry.packageName, launchIntent, hideRecents)
     }
 
     private fun launchColdAndTrackTask(
         context: Context,
         pkg: String,
         launchIntent: Intent,
-        hideRecents: Boolean,
-        wantPopup: Boolean
+        hideRecents: Boolean
     ) {
-        val comp = launchIntent.component
-        if (wantPopup && comp != null) {
-            val compStr = "${comp.packageName}/${comp.className}"
-            val flagInt = if (hideRecents) FLAGS_NEW_EXCLUDE_RECENTS else Intent.FLAG_ACTIVITY_NEW_TASK
-            val cmd = "am start --windowingMode 5 -f $flagInt -n '$compStr'"
-            ShizukuBridge.execAsync(context, cmd) { output ->
-                if (output == null || output.contains("Error", ignoreCase = true) || output.startsWith("ERR:")) {
-                    launchNativeIntent(context, launchIntent, hideRecents)
-                }
-            }
-        } else {
-            launchNativeIntent(context, launchIntent, hideRecents)
-        }
+        launchNativeIntent(context, launchIntent, hideRecents)
 
         if (ShizukuBridge.isReadyCached) {
             mainHandler.postDelayed({
                 ShizukuBridge.captureAndHideTaskAsync(context, pkg, hideRecents) { tid ->
-                    if (tid > 0) DockSessionTracker.rememberDockTaskId(pkg, tid)
+                    if (tid > 0) {
+                        DockSessionTracker.rememberDockTaskId(pkg, tid)
+                        ShizukuBridge.setTaskFullscreenAsync(context, tid)
+                    }
                 }
-            }, 320L)
+            }, 300L)
         }
     }
 
@@ -155,7 +141,6 @@ object AppLauncherEngine {
         val returnPkg = DockSessionTracker.returnTargetPackage
         val returnTid = DockSessionTracker.returnTargetTaskId
         val wasHome = DockSessionTracker.returnWasHome
-        val wasPopup = DockSessionTracker.openedInPopupMode
         val elapsedSinceLaunch = System.currentTimeMillis() - DockSessionTracker.sessionStartedAt
 
         DockSessionTracker.clearSession()
@@ -164,13 +149,6 @@ object AppLauncherEngine {
         val keepAlive = entry?.keepAlive ?: true
         val hideRecents = DockPrefs.isHideFromRecents(context)
         val shizukuReady = ShizukuBridge.isReadyCached
-
-        if (wasPopup && shizukuReady && !dockPkg.isNullOrBlank()) {
-            val dockTid = DockSessionTracker.getKnownDockTaskId(dockPkg)
-            if (dockTid > 0 && keepAlive) {
-                ShizukuBridge.setTaskFullscreenAsync(context, dockTid)
-            }
-        }
 
         val bringTargetBackNow: () -> Unit = {
             if (wasHome) {
