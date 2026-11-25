@@ -76,6 +76,23 @@ class EdgeDockAccessibilityService : AccessibilityService() {
     }
 
     /**
+     * Checks whether a given package currently has ANY visible application window on screen
+     * (handles both fullscreen and Samsung Pop-up / Freeform windows accurately).
+     */
+    fun isPackageVisibleNow(targetPkg: String): Boolean {
+        if (targetPkg.isBlank()) return false
+        return try {
+            val winList = windows ?: return false
+            winList.any { w ->
+                w.type == AccessibilityWindowInfo.TYPE_APPLICATION &&
+                    w.root?.packageName?.toString()?.trim() == targetPkg
+            }
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    /**
      * Live inspection of the current interactive window stack.
      * Accurately identifies YouTube or any open app even if it was opened hours before Edge Dock started!
      */

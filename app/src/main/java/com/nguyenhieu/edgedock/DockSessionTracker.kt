@@ -119,10 +119,21 @@ object DockSessionTracker {
     fun onForegroundPackageChanged(pkg: String, isLauncher: Boolean) {
         currentForegroundPackage = pkg
         val active = activeDockPackage ?: return
-        if (System.currentTimeMillis() - sessionStartedAt < 1600L) return
-        if (pkg != active) {
-            if (openedInPopupMode && pkg == returnTargetPackage) return
+        val elapsed = System.currentTimeMillis() - sessionStartedAt
+        if (elapsed < 550L) return
+        if (isLauncher) {
+            // User swiped to Home Screen -> clear X indicator immediately!
             clearSession()
+            return
+        }
+        if (pkg != active) {
+            if (openedInPopupMode) {
+                // Only keep X indicator if the popup window itself is still visibly on screen
+                val stillVisible = EdgeDockAccessibilityService.instance?.isPackageVisibleNow(active) == true
+                if (!stillVisible) clearSession()
+            } else {
+                clearSession()
+            }
         }
     }
 }

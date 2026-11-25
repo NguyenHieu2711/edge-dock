@@ -96,6 +96,41 @@ class EdgeOverlayService : Service() {
 
     private val sessionListener: () -> Unit = {
         updateHandleAppearance()
+        syncSessionWatchdog()
+    }
+
+    private val sessionWatchdog = object : Runnable {
+        override fun run() {
+            val activePkg = DockSessionTracker.activeDockPackage ?: return
+            val elapsed = System.currentTimeMillis() - DockSessionTracker.sessionStartedAt
+            if (elapsed >= 750L) {
+                val acc = EdgeDockAccessibilityService.instance
+                if (acc != null) {
+                    if (!acc.isPackageVisibleNow(activePkg)) {
+                        DockSessionTracker.clearSession()
+                        return
+                    }
+                } else if (ShizukuBridge.isReadyCached) {
+                    val ignoreCsv = "$packageName,com.android.systemui,android"
+                    ShizukuBridge.getTopTaskAsync(this@EdgeOverlayService, ignoreCsv) { _, topPkg ->
+                        val curActive = DockSessionTracker.activeDockPackage
+                        if (curActive != null && topPkg.isNotBlank() && topPkg != curActive && !DockSessionTracker.openedInPopupMode) {
+                            DockSessionTracker.clearSession()
+                        }
+                    }
+                }
+            }
+            if (DockSessionTracker.isSessionActive()) {
+                mainHandler.postDelayed(this, 650L)
+            }
+        }
+    }
+
+    private fun syncSessionWatchdog() {
+        mainHandler.removeCallbacks(sessionWatchdog)
+        if (DockSessionTracker.isSessionActive()) {
+            mainHandler.postDelayed(sessionWatchdog, 750L)
+        }
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -130,6 +165,7 @@ class EdgeOverlayService : Service() {
     override fun onDestroy() {
         isRunning = false
         if (activeInstance === this) activeInstance = null
+        mainHandler.removeCallbacks(sessionWatchdog)
         DockSessionTracker.removeListener(sessionListener)
         closeDockPanel()
         detachHandleOverlay()
