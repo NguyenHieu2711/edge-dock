@@ -2,7 +2,11 @@ package com.nguyenhieu.edgedock
 
 import android.Manifest
 import android.app.AlertDialog
+import android.app.DownloadManager
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
@@ -10,6 +14,9 @@ import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
 import android.text.Editable
 import android.text.TextUtils
@@ -17,9 +24,13 @@ import android.text.TextWatcher
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
+import android.view.ViewGroup
+import android.widget.BaseAdapter
 import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.ListView
 import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.Switch
@@ -28,9 +39,22 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.core.view.WindowInsetsControllerCompat
+import org.json.JSONObject
+import java.io.File
+import java.net.HttpURLConnection
+import java.net.URL
+import java.util.concurrent.Executors
 
 class MainActivity : AppCompatActivity() {
+
+    companion object {
+        private const val GITHUB_REPO = "NguyenHieu2711/edge-dock"
+    }
+
+    private val netExecutor = Executors.newSingleThreadExecutor()
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     private lateinit var rootList: LinearLayout
     private lateinit var masterSwitch: Switch
@@ -41,14 +65,40 @@ class MainActivity : AppCompatActivity() {
     private lateinit var sideLeftBtn: TextView
     private lateinit var sideRightBtn: TextView
 
+    private var activeDownloadId: Long = -1L
+    private var activeUpdateApkFile: File? = null
+    private var pendingInstallApkFile: File? = null
+
     private val shizukuListener: () -> Unit = {
         refreshStatusBadges()
+    }
+
+    private val downloadReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action != DownloadManager.ACTION_DOWNLOAD_COMPLETE) return
+            val id = intent.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1L)
+            if (id == -1L || id != activeDownloadId) return
+            activeDownloadId = -1L
+            val f = activeUpdateApkFile
+            if (f != null && f.exists()) {
+                promptInstallApk(f)
+            }
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         ShizukuBridge.init(this)
         ShizukuBridge.addStatusListener(shizukuListener)
+        DockAppCache.warmUp(this)
+        DockAppCache.loadInstalledAppsAsync(this) {}
+
+        ContextCompat.registerReceiver(
+            this,
+            downloadReceiver,
+            IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE),
+            ContextCompat.RECEIVER_EXPORTED
+        )
 
         window.statusBarColor = Color.parseColor("#14161C")
         window.navigationBarColor = Color.parseColor("#14161C")
@@ -67,15 +117,26 @@ class MainActivity : AppCompatActivity() {
 
         buildUi()
         refreshAll()
+        checkForUpdate(manual = false)
     }
 
     override fun onResume() {
         super.onResume()
+        val pending = pendingInstallApkFile
+        if (pending != null && pending.exists() && packageManager.canRequestPackageInstalls()) {
+            pendingInstallApkFile = null
+            promptInstallApk(pending)
+            return
+        }
         refreshAll()
     }
 
     override fun onDestroy() {
         ShizukuBridge.removeStatusListener(shizukuListener)
+        try {
+            unregisterReceiver(downloadReceiver)
+        } catch (_: Throwable) {
+        }
         super.onDestroy()
     }
 
@@ -90,6 +151,21 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun makeIconBtn(resId: Int, iconDp: Float, tintHex: String, boxDp: Float = 30f, onClick: () -> Unit): FrameLayout {
+        return FrameLayout(this).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(boxDp), dp(boxDp))
+            addView(
+                ImageView(this@MainActivity).apply {
+                    setImageResource(resId)
+                    setColorFilter(Color.parseColor(tintHex))
+                    scaleType = ImageView.ScaleType.FIT_CENTER
+                },
+                FrameLayout.LayoutParams(dp(iconDp), dp(iconDp)).apply { gravity = Gravity.CENTER }
+            )
+            setOnClickListener { onClick() }
+        }
+    }
+
     private fun buildUi() {
         val scroll = ScrollView(this).apply {
             setBackgroundColor(Color.parseColor("#14161C"))
@@ -100,11 +176,15 @@ class MainActivity : AppCompatActivity() {
             setPadding(dp(16f), dp(14f), dp(16f), dp(28f))
         }
 
-        // 1. Minimal Header + Master Switch
+        // 1. Minimal Header + Update Icon + Master Switch
         val header = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(2f), dp(4f), dp(2f), dp(14f))
+        }
+        val titleWrap = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
         }
         val titleTv = TextView(this).apply {
             text = "Edge Dock"
@@ -112,12 +192,25 @@ class MainActivity : AppCompatActivity() {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 21f)
             typeface = Typeface.DEFAULT_BOLD
         }
-        header.addView(titleTv, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        val verTv = TextView(this).apply {
+            text = "v${BuildConfig.VERSION_NAME}"
+            setTextColor(Color.parseColor("#64748B"))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            setPadding(dp(8f), dp(3f), 0, 0)
+        }
+        titleWrap.addView(titleTv)
+        titleWrap.addView(verTv)
+        header.addView(titleWrap, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+
+        val updateBtn = makeIconBtn(R.drawable.ic_flat_refresh, 17f, "#94A3B8", 34f) {
+            checkForUpdate(manual = true)
+        }.apply {
+            (layoutParams as LinearLayout.LayoutParams).marginEnd = dp(8f)
+        }
+        header.addView(updateBtn)
 
         masterSwitch = Switch(this).apply {
-            setOnCheckedChangeListener { _, checked ->
-                onMasterToggled(checked)
-            }
+            setOnCheckedChangeListener { _, checked -> onMasterToggled(checked) }
         }
         header.addView(masterSwitch)
         rootList.addView(header)
@@ -129,8 +222,7 @@ class MainActivity : AppCompatActivity() {
             setPadding(dp(14f), dp(8f), dp(14f), dp(8f))
         }
         statusOverlayBadge = addStatusRow(permCard, "Vẽ đè màn hình", false) {
-            val i = Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
-            startActivity(i)
+            startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
         }
         addDivider(permCard)
         statusAccessBadge = addStatusRow(permCard, "Quay về app cũ (Accessibility)", false) {
@@ -142,7 +234,7 @@ class MainActivity : AppCompatActivity() {
         }
         rootList.addView(permCard, cardLp())
 
-        // 3. Pinned Apps Card (Core Feature)
+        // 3. Pinned Apps Card
         val appsHeader = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -156,18 +248,31 @@ class MainActivity : AppCompatActivity() {
         }
         appsHeader.addView(appsTitle, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
 
-        val addBtn = TextView(this).apply {
-            text = "+ Thêm app"
-            setTextColor(Color.parseColor("#061826"))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
-            typeface = Typeface.DEFAULT_BOLD
+        val addBtn = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
             background = GradientDrawable().apply {
                 setColor(Color.parseColor("#38BDF8"))
                 cornerRadius = dp(99f).toFloat()
             }
-            setPadding(dp(13f), dp(6f), dp(13f), dp(6f))
+            setPadding(dp(11f), dp(6f), dp(13f), dp(6f))
             setOnClickListener { openAppPickerDialog() }
         }
+        addBtn.addView(
+            ImageView(this).apply {
+                setImageResource(R.drawable.ic_flat_plus)
+                setColorFilter(Color.parseColor("#061826"))
+            },
+            LinearLayout.LayoutParams(dp(13f), dp(13f)).apply { marginEnd = dp(4f) }
+        )
+        addBtn.addView(
+            TextView(this).apply {
+                text = "Thêm app"
+                setTextColor(Color.parseColor("#061826"))
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+                typeface = Typeface.DEFAULT_BOLD
+            }
+        )
         appsHeader.addView(addBtn)
         rootList.addView(appsHeader)
 
@@ -200,13 +305,12 @@ class MainActivity : AppCompatActivity() {
         addDivider(cfgCard)
         addToggleRow(cfgCard, "Mở cửa sổ nổi Pop-up (Shizuku)", DockPrefs.isPopupMode(this)) { on ->
             DockPrefs.setPopupMode(this, on)
-            if (on && ShizukuBridge.getStatus(this) != ShizukuBridge.Status.READY) {
+            if (on && !ShizukuBridge.isReadyCached) {
                 Toast.makeText(this, "Cần bật & cấp quyền Shizuku để mở cửa sổ nổi", Toast.LENGTH_SHORT).show()
             }
         }
         addDivider(cfgCard)
 
-        // Side picker: Left | Right
         val sideRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -240,12 +344,10 @@ class MainActivity : AppCompatActivity() {
         cfgCard.addView(sideRow)
         addDivider(cfgCard)
 
-        // Vertical position slider
         addSliderRow(cfgCard, "Vị trí cao / thấp", DockPrefs.getHandleYPct(this), 12, 86) { value ->
             DockPrefs.setHandleYPct(this, value)
             EdgeOverlayService.refresh(this)
         }
-        // Opacity slider
         addSliderRow(cfgCard, "Độ rõ thanh gạt", DockPrefs.getHandleAlphaPct(this), 15, 90) { value ->
             DockPrefs.setHandleAlphaPct(this, value)
             EdgeOverlayService.refresh(this)
@@ -261,9 +363,7 @@ class MainActivity : AppCompatActivity() {
         return LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT,
             LinearLayout.LayoutParams.WRAP_CONTENT
-        ).apply {
-            topMargin = dp(topDp)
-        }
+        ).apply { topMargin = dp(topDp) }
     }
 
     private fun addDivider(parent: LinearLayout) {
@@ -321,9 +421,7 @@ class MainActivity : AppCompatActivity() {
             orientation = LinearLayout.VERTICAL
             setPadding(0, dp(8f), 0, dp(4f))
         }
-        val top = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-        }
+        val top = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         val lbl = TextView(this).apply {
             text = label
             setTextColor(Color.parseColor("#CBD5E1"))
@@ -443,19 +541,12 @@ class MainActivity : AppCompatActivity() {
 
     private fun handleShizukuAction() {
         when (ShizukuBridge.getStatus(this)) {
-            ShizukuBridge.Status.READY -> {
-                Toast.makeText(this, "Shizuku đã kết nối sẵn sàng", Toast.LENGTH_SHORT).show()
-            }
-            ShizukuBridge.Status.NEED_PERMISSION -> {
-                ShizukuBridge.requestPermission()
-            }
+            ShizukuBridge.Status.READY -> Toast.makeText(this, "Shizuku đã kết nối sẵn sàng", Toast.LENGTH_SHORT).show()
+            ShizukuBridge.Status.NEED_PERMISSION -> ShizukuBridge.requestPermission()
             ShizukuBridge.Status.NOT_RUNNING -> {
                 val launch = packageManager.getLaunchIntentForPackage("moe.shizuku.privileged.api")
-                if (launch != null) {
-                    startActivity(launch)
-                } else {
-                    Toast.makeText(this, "Mở app Shizuku và bấm Start qua Wireless Debugging", Toast.LENGTH_LONG).show()
-                }
+                if (launch != null) startActivity(launch)
+                else Toast.makeText(this, "Mở app Shizuku và bấm Start", Toast.LENGTH_LONG).show()
             }
             ShizukuBridge.Status.NOT_INSTALLED -> {
                 try {
@@ -463,7 +554,7 @@ class MainActivity : AppCompatActivity() {
                         Intent(Intent.ACTION_VIEW, Uri.parse("https://play.google.com/store/apps/details?id=moe.shizuku.privileged.api"))
                     )
                 } catch (_: Throwable) {
-                    Toast.makeText(this, "Cài Shizuku từ CH Play để bật tắt chạy ngầm triệt để", Toast.LENGTH_LONG).show()
+                    Toast.makeText(this, "Cài Shizuku từ CH Play", Toast.LENGTH_LONG).show()
                 }
             }
         }
@@ -471,7 +562,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun renderPinnedAppsList() {
         appsContainer.removeAllViews()
-        val apps = DockPrefs.loadApps(this)
+        val apps = DockAppCache.getPinnedApps(this)
         if (apps.isEmpty()) {
             val empty = TextView(this).apply {
                 text = "Chưa có app nào"
@@ -484,28 +575,28 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        val pm = packageManager
         apps.forEachIndexed { idx, entry ->
             if (idx > 0) addDivider(appsContainer)
 
             val row = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(0, dp(9f), 0, dp(9f))
+                setPadding(0, dp(8f), 0, dp(8f))
             }
 
             val icon = ImageView(this).apply {
                 scaleType = ImageView.ScaleType.FIT_CENTER
-                try {
-                    setImageDrawable(pm.getApplicationIcon(entry.packageName))
-                } catch (_: Throwable) {
+                val cached = DockAppCache.getCachedIcon(entry.packageName)
+                if (cached != null) {
+                    setImageDrawable(cached)
+                } else {
                     setImageResource(R.drawable.ic_launcher_fg)
+                    DockAppCache.loadIconAsync(this@MainActivity, entry.packageName) { d ->
+                        if (d != null && isAttachedToWindow) setImageDrawable(d)
+                    }
                 }
             }
-            row.addView(
-                icon,
-                LinearLayout.LayoutParams(dp(34f), dp(34f)).apply { marginEnd = dp(10f) }
-            )
+            row.addView(icon, LinearLayout.LayoutParams(dp(34f), dp(34f)).apply { marginEnd = dp(10f) })
 
             val nameTv = TextView(this).apply {
                 text = entry.label
@@ -516,7 +607,6 @@ class MainActivity : AppCompatActivity() {
             }
             row.addView(nameTv, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
 
-            // Per-app Keep-Alive toggle pill (Chạy ngầm BẬT / TẮT)
             val bgPill = TextView(this).apply {
                 text = if (entry.keepAlive) "Ngầm · Bật" else "Ngầm · Tắt"
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
@@ -530,22 +620,22 @@ class MainActivity : AppCompatActivity() {
                 setPadding(dp(9f), dp(4f), dp(9f), dp(4f))
                 setOnClickListener {
                     DockPrefs.toggleKeepAlive(this@MainActivity, entry.packageName)
+                    DockAppCache.invalidatePinnedApps(this@MainActivity)
                     renderPinnedAppsList()
                     EdgeOverlayService.refresh(this@MainActivity)
                 }
             }
-            row.addView(bgPill, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
-                marginStart = dp(6f)
-            })
+            row.addView(
+                bgPill,
+                LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                    marginStart = dp(6f)
+                    marginEnd = dp(4f)
+                }
+            )
 
-            // Battery settings shortcut (for keeping app unrestricted on Samsung One UI)
-            val batBtn = TextView(this).apply {
-                text = "⚡"
-                setTextColor(Color.parseColor("#94A3B8"))
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-                gravity = Gravity.CENTER
-                setPadding(dp(7f), dp(4f), dp(7f), dp(4f))
-                setOnClickListener {
+            // Flat Vector Battery/Settings shortcut (replaces emoji)
+            row.addView(
+                makeIconBtn(R.drawable.ic_flat_bolt, 15f, "#94A3B8", 28f) {
                     try {
                         startActivity(
                             Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${entry.packageName}"))
@@ -553,65 +643,46 @@ class MainActivity : AppCompatActivity() {
                     } catch (_: Throwable) {
                     }
                 }
-            }
-            row.addView(batBtn)
+            )
 
-            // Move Up
             if (idx > 0) {
-                val upBtn = TextView(this).apply {
-                    text = "↑"
-                    setTextColor(Color.parseColor("#94A3B8"))
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-                    setPadding(dp(6f), dp(4f), dp(6f), dp(4f))
-                    setOnClickListener {
+                row.addView(
+                    makeIconBtn(R.drawable.ic_flat_chev_up, 15f, "#94A3B8", 26f) {
                         val list = DockPrefs.loadApps(this@MainActivity)
                         if (idx in 1 until list.size) {
                             val tmp = list[idx - 1]
                             list[idx - 1] = list[idx]
                             list[idx] = tmp
                             DockPrefs.saveApps(this@MainActivity, list)
+                            DockAppCache.invalidatePinnedApps(this@MainActivity)
                             renderPinnedAppsList()
                             EdgeOverlayService.refresh(this@MainActivity)
                         }
                     }
-                }
-                row.addView(upBtn)
+                )
             }
 
-            // Remove
-            val delBtn = TextView(this).apply {
-                text = "✕"
-                setTextColor(Color.parseColor("#F87171"))
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-                setPadding(dp(7f), dp(4f), dp(2f), dp(4f))
-                setOnClickListener {
+            row.addView(
+                makeIconBtn(R.drawable.ic_flat_close, 14f, "#F87171", 26f) {
                     val list = DockPrefs.loadApps(this@MainActivity).filter { it.packageName != entry.packageName }
                     DockPrefs.saveApps(this@MainActivity, list)
+                    DockAppCache.invalidatePinnedApps(this@MainActivity)
                     renderPinnedAppsList()
                     EdgeOverlayService.refresh(this@MainActivity)
                 }
-            }
-            row.addView(delBtn)
+            )
 
             appsContainer.addView(row)
         }
     }
 
+    // =========================================================================
+    // 120FPS RECYCLED LISTVIEW APP PICKER (ZERO MAIN-THREAD ICON DECODING!)
+    // =========================================================================
     private fun openAppPickerDialog() {
-        val pm = packageManager
-        val mainIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
-        val resolved = pm.queryIntentActivities(mainIntent, 0)
-            .filter { it.activityInfo?.packageName != packageName }
-            .distinctBy { it.activityInfo.packageName }
-            .map {
-                Pair(
-                    it.activityInfo.packageName,
-                    it.loadLabel(pm)?.toString()?.trim().orEmpty().ifEmpty { it.activityInfo.packageName }
-                )
-            }
-            .sortedBy { it.second.lowercase() }
-
         val selectedMap = DockPrefs.loadApps(this).associateBy { it.packageName }.toMutableMap()
+        var allApps: List<Pair<String, String>> = emptyList()
+        var filteredApps: List<Pair<String, String>> = emptyList()
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -630,84 +701,108 @@ class MainActivity : AppCompatActivity() {
         }
         root.addView(searchBox, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
 
-        val listScroll = ScrollView(this).apply {
-            isVerticalScrollBarEnabled = true
+        val adapter = object : BaseAdapter() {
+            override fun getCount(): Int = filteredApps.size
+            override fun getItem(pos: Int): Pair<String, String> = filteredApps[pos]
+            override fun getItemId(pos: Int): Long = pos.toLong()
+
+            override fun getView(pos: Int, convertView: View?, parent: ViewGroup?): View {
+                val row: LinearLayout
+                val iconIv: ImageView
+                val titleTv: TextView
+                val stateIv: ImageView
+
+                if (convertView == null) {
+                    row = LinearLayout(this@MainActivity).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.CENTER_VERTICAL
+                        setPadding(dp(8f), dp(8f), dp(8f), dp(8f))
+                    }
+                    iconIv = ImageView(this@MainActivity).apply {
+                        scaleType = ImageView.ScaleType.FIT_CENTER
+                    }
+                    titleTv = TextView(this@MainActivity).apply {
+                        setTextColor(Color.parseColor("#F1F5F9"))
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                        maxLines = 1
+                        ellipsize = TextUtils.TruncateAt.END
+                    }
+                    stateIv = ImageView(this@MainActivity).apply {
+                        scaleType = ImageView.ScaleType.FIT_CENTER
+                    }
+                    row.addView(iconIv, LinearLayout.LayoutParams(dp(30f), dp(30f)).apply { marginEnd = dp(10f) })
+                    row.addView(titleTv, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+                    row.addView(stateIv, LinearLayout.LayoutParams(dp(16f), dp(16f)).apply { marginStart = dp(8f) })
+                    row.tag = Triple(iconIv, titleTv, stateIv)
+                } else {
+                    row = convertView as LinearLayout
+                    @Suppress("UNCHECKED_CAST")
+                    val holder = row.tag as Triple<ImageView, TextView, ImageView>
+                    iconIv = holder.first
+                    titleTv = holder.second
+                    stateIv = holder.third
+                }
+
+                val (pkg, label) = filteredApps[pos]
+                val isSel = selectedMap.containsKey(pkg)
+                row.background = GradientDrawable().apply {
+                    setColor(if (isSel) Color.parseColor("#1E2C40") else Color.TRANSPARENT)
+                    cornerRadius = dp(9f).toFloat()
+                }
+                titleTv.text = label
+                stateIv.setImageResource(if (isSel) R.drawable.ic_flat_check else R.drawable.ic_flat_plus)
+                stateIv.setColorFilter(Color.parseColor(if (isSel) "#38BDF8" else "#64748B"))
+
+                iconIv.tag = pkg
+                val cached = DockAppCache.getCachedIcon(pkg)
+                if (cached != null) {
+                    iconIv.setImageDrawable(cached)
+                } else {
+                    iconIv.setImageResource(R.drawable.ic_launcher_fg)
+                    DockAppCache.loadIconAsync(this@MainActivity, pkg) { d ->
+                        if (d != null && iconIv.tag == pkg) {
+                            iconIv.setImageDrawable(d)
+                        }
+                    }
+                }
+                return row
+            }
         }
-        val listHost = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(0, dp(8f), 0, dp(4f))
+
+        val listView = ListView(this).apply {
+            this.adapter = adapter
+            divider = null
+            dividerHeight = dp(2f)
+            setOnItemClickListener { _, _, pos, _ ->
+                if (pos !in filteredApps.indices) return@setOnItemClickListener
+                val (pkg, label) = filteredApps[pos]
+                if (selectedMap.containsKey(pkg)) selectedMap.remove(pkg)
+                else selectedMap[pkg] = DockAppEntry(pkg, label, keepAlive = true)
+                adapter.notifyDataSetChanged()
+            }
         }
-        listScroll.addView(listHost)
         root.addView(
-            listScroll,
+            listView,
             LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(360f)).apply {
                 topMargin = dp(8f)
             }
         )
 
-        fun renderPicker(query: String) {
-            listHost.removeAllViews()
-            val q = query.trim().lowercase()
-            val filtered = if (q.isEmpty()) resolved else resolved.filter {
+        fun applyFilter(qRaw: String) {
+            val q = qRaw.trim().lowercase()
+            filteredApps = if (q.isEmpty()) allApps else allApps.filter {
                 it.second.lowercase().contains(q) || it.first.lowercase().contains(q)
             }
-            for ((pkg, label) in filtered) {
-                val isSel = selectedMap.containsKey(pkg)
-                val row = LinearLayout(this).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER_VERTICAL
-                    setPadding(dp(6f), dp(8f), dp(6f), dp(8f))
-                    background = GradientDrawable().apply {
-                        setColor(if (isSel) Color.parseColor("#1E2C40") else Color.TRANSPARENT)
-                        cornerRadius = dp(9f).toFloat()
-                    }
-                }
-                val iv = ImageView(this).apply {
-                    try {
-                        setImageDrawable(pm.getApplicationIcon(pkg))
-                    } catch (_: Throwable) {
-                    }
-                }
-                row.addView(iv, LinearLayout.LayoutParams(dp(30f), dp(30f)).apply { marginEnd = dp(10f) })
-
-                val tv = TextView(this).apply {
-                    text = label
-                    setTextColor(Color.parseColor("#F1F5F9"))
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-                    maxLines = 1
-                    ellipsize = TextUtils.TruncateAt.END
-                }
-                row.addView(tv, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-
-                val check = TextView(this).apply {
-                    text = if (isSel) "✓" else "+"
-                    setTextColor(Color.parseColor(if (isSel) "#38BDF8" else "#64748B"))
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-                    typeface = Typeface.DEFAULT_BOLD
-                    setPadding(dp(8f), 0, dp(4f), 0)
-                }
-                row.addView(check)
-
-                row.setOnClickListener {
-                    if (selectedMap.containsKey(pkg)) {
-                        selectedMap.remove(pkg)
-                    } else {
-                        selectedMap[pkg] = DockAppEntry(pkg, label, keepAlive = true)
-                    }
-                    renderPicker(searchBox.text.toString())
-                }
-                listHost.addView(row)
-            }
+            adapter.notifyDataSetChanged()
         }
 
         searchBox.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
-                renderPicker(s?.toString().orEmpty())
+                applyFilter(s?.toString().orEmpty())
             }
             override fun afterTextChanged(s: Editable?) {}
         })
-        renderPicker("")
 
         val btnRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -736,26 +831,124 @@ class MainActivity : AppCompatActivity() {
         btnRow.addView(saveBtn)
         root.addView(btnRow)
 
-        val dlg = AlertDialog.Builder(this)
-            .setView(root)
-            .create()
+        val dlg = AlertDialog.Builder(this).setView(root).create()
         dlg.window?.setBackgroundDrawable(cardBg("#181C25", "#2F384A", 16f))
         cancelBtn.setOnClickListener { dlg.dismiss() }
         saveBtn.setOnClickListener {
             val oldOrder = DockPrefs.loadApps(this)
             val finalList = mutableListOf<DockAppEntry>()
-            for (old in oldOrder) {
-                selectedMap[old.packageName]?.let { finalList.add(it) }
-            }
+            for (old in oldOrder) selectedMap[old.packageName]?.let { finalList.add(it) }
             val existingPkgs = finalList.map { it.packageName }.toSet()
             for ((pkg, entry) in selectedMap) {
                 if (pkg !in existingPkgs) finalList.add(entry)
             }
             DockPrefs.saveApps(this, finalList)
+            DockAppCache.invalidatePinnedApps(this)
             renderPinnedAppsList()
             EdgeOverlayService.refresh(this)
             dlg.dismiss()
         }
         dlg.show()
+
+        DockAppCache.loadInstalledAppsAsync(this) { loaded ->
+            allApps = loaded
+            applyFilter(searchBox.text.toString())
+        }
+    }
+
+    // =========================================================================
+    // LIGHTWEIGHT GITHUB IN-APP APK SELF-UPDATER
+    // =========================================================================
+    private fun checkForUpdate(manual: Boolean) {
+        netExecutor.execute {
+            val manifest = fetchLatestManifest()
+            mainHandler.post {
+                if (isFinishing || isDestroyed) return@post
+                if (manifest == null) {
+                    if (manual) Toast.makeText(this, "Không kiểm tra được cập nhật", Toast.LENGTH_SHORT).show()
+                    return@post
+                }
+                val tag = manifest.optString("tag_name", "").trim()
+                val apkUrl = manifest.optString("apk_url", "").trim()
+                if (tag.isNotEmpty() && apkUrl.isNotEmpty() && isNewerVersion(tag, BuildConfig.VERSION_NAME)) {
+                    AlertDialog.Builder(this)
+                        .setTitle("Có bản mới ($tag)")
+                        .setMessage("Cập nhật Edge Dock từ v${BuildConfig.VERSION_NAME} lên $tag?")
+                        .setPositiveButton("Cập nhật") { _, _ -> downloadAndInstallApk(tag, apkUrl) }
+                        .setNegativeButton("Để sau", null)
+                        .show()
+                } else if (manual) {
+                    Toast.makeText(this, "Đang ở bản mới nhất (v${BuildConfig.VERSION_NAME})", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
+
+    private fun fetchLatestManifest(): JSONObject? {
+        var conn: HttpURLConnection? = null
+        return try {
+            val url = "https://raw.githubusercontent.com/$GITHUB_REPO/main/releases/latest.json?t=${System.currentTimeMillis()}"
+            conn = (URL(url).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 4500
+                readTimeout = 4500
+                setRequestProperty("Cache-Control", "no-cache")
+            }
+            if (conn.responseCode != HttpURLConnection.HTTP_OK) return null
+            JSONObject(conn.inputStream.bufferedReader().use { it.readText() })
+        } catch (_: Throwable) {
+            null
+        } finally {
+            conn?.disconnect()
+        }
+    }
+
+    private fun isNewerVersion(remote: String, local: String): Boolean {
+        val r = remote.removePrefix("v").removePrefix("V").split(".").map { it.toIntOrNull() ?: 0 }
+        val l = local.removePrefix("v").removePrefix("V").split(".").map { it.toIntOrNull() ?: 0 }
+        val n = maxOf(r.size, l.size)
+        for (i in 0 until n) {
+            val rv = r.getOrElse(i) { 0 }
+            val lv = l.getOrElse(i) { 0 }
+            if (rv > lv) return true
+            if (rv < lv) return false
+        }
+        return false
+    }
+
+    private fun downloadAndInstallApk(tag: String, apkUrl: String) {
+        try {
+            val dir = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: return
+            dir.listFiles()?.forEach { if (it.name.endsWith(".apk", true)) it.delete() }
+            val name = "edge-dock-$tag.apk"
+            activeUpdateApkFile = File(dir, name)
+            val req = DownloadManager.Request(Uri.parse(apkUrl))
+                .setTitle("Đang tải Edge Dock $tag")
+                .setMimeType("application/vnd.android.package-archive")
+                .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE)
+                .setDestinationInExternalFilesDir(this, Environment.DIRECTORY_DOWNLOADS, name)
+            val dm = getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+            activeDownloadId = dm.enqueue(req)
+            Toast.makeText(this, "Đang tải $tag...", Toast.LENGTH_SHORT).show()
+        } catch (_: Throwable) {
+            Toast.makeText(this, "Lỗi tải bản cập nhật", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun promptInstallApk(file: File) {
+        if (!packageManager.canRequestPackageInstalls()) {
+            pendingInstallApkFile = file
+            Toast.makeText(this, "Bật quyền Cài ứng dụng không xác định cho Edge Dock", Toast.LENGTH_LONG).show()
+            startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")))
+            return
+        }
+        try {
+            val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, "application/vnd.android.package-archive")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            startActivity(intent)
+        } catch (_: Throwable) {
+        }
     }
 }

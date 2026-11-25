@@ -2,7 +2,6 @@ package com.nguyenhieu.edgedock
 
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.os.Handler
 import android.os.Looper
 import android.widget.Toast
@@ -13,33 +12,26 @@ object AppLauncherEngine {
     // FLAG_ACTIVITY_NEW_TASK (0x10000000) | FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS (0x00800000)
     private const val FLAGS_NEW_EXCLUDE_RECENTS = 0x10800000
 
-    private fun getHomePackages(context: Context): Set<String> {
-        return try {
-            val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
-            context.packageManager.queryIntentActivities(intent, PackageManager.MATCH_DEFAULT_ONLY)
-                .mapNotNull { it.activityInfo?.packageName }
-                .toSet()
-        } catch (_: Throwable) {
-            emptySet()
-        }
-    }
-
     fun launchDockApp(context: Context, entry: DockAppEntry) {
-        val pm = context.packageManager
-        val launchIntent = pm.getLaunchIntentForPackage(entry.packageName)
+        val launchIntent = DockAppCache.getLaunchIntent(context, entry.packageName)
         if (launchIntent == null) {
-            Toast.makeText(context, "Không tìm thấy app ${entry.label}", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, "Không tìm thấy ${entry.label}", Toast.LENGTH_SHORT).show()
             return
         }
 
         val currentFg = DockSessionTracker.currentForegroundPackage
-        val homePkgs = getHomePackages(context)
+        val homePkgs = DockAppCache.getHomePackages(context)
         val isFromHome = currentFg.isNullOrBlank() || currentFg in homePkgs
         val prevTarget = if (!isFromHome && currentFg != entry.packageName && currentFg != context.packageName) {
             currentFg
         } else null
 
-        val wantPopup = DockPrefs.isPopupMode(context) && ShizukuBridge.getStatus(context) == ShizukuBridge.Status.READY
+        // Pre-warm the return app (e.g. YouTube) LaunchIntent in RAM so 1-tap close has 0ms IPC delay
+        if (!prevTarget.isNullOrBlank()) {
+            DockAppCache.warmLaunchIntentAsync(context, prevTarget)
+        }
+
+        val wantPopup = DockPrefs.isPopupMode(context) && ShizukuBridge.isReadyCached
         val hideRecents = DockPrefs.isHideFromRecents(context)
 
         DockSessionTracker.startSession(
@@ -56,7 +48,6 @@ object AppLauncherEngine {
             val cmd = "am start --windowingMode 5 -f $flagInt -n '$compStr'"
             ShizukuBridge.execAsync(context, cmd) { output ->
                 if (output == null || output.contains("Error", ignoreCase = true) || output.startsWith("ERR:")) {
-                    // Graceful fallback to native launch if One UI rejects freeform flag
                     launchNativeIntent(context, launchIntent, hideRecents)
                 }
             }
@@ -79,12 +70,6 @@ object AppLauncherEngine {
         }
     }
 
-    /**
-     * One-tap dismiss from the dim Edge Handle badge:
-     * - Restores the previous app (e.g. YouTube) right where you left off!
-     * - If keepAlive == true: keeps the dock app warm in RAM (instant re-open) & hidden from Recents.
-     * - If keepAlive == false: force-stops the dock app via Shizuku after returning cleanly.
-     */
     fun dismissActiveDockApp(context: Context) {
         val dockPkg = DockSessionTracker.activeDockPackage
         val returnPkg = DockSessionTracker.returnTargetPackage
@@ -93,11 +78,11 @@ object AppLauncherEngine {
 
         DockSessionTracker.clearSession()
 
-        val entry = dockPkg?.let { DockPrefs.getAppEntry(context, it) }
+        val entry = dockPkg?.let { p -> DockAppCache.getPinnedApps(context).firstOrNull { it.packageName == p } }
         val keepAlive = entry?.keepAlive ?: true
-        val shizukuReady = ShizukuBridge.getStatus(context) == ShizukuBridge.Status.READY
+        val shizukuReady = ShizukuBridge.isReadyCached
 
-        // 1. Restore previous app (e.g. YouTube) immediately for zero visual flash
+        // 1. Instant 0ms restore of previous app (e.g. YouTube) from pre-warmed LaunchIntent cache
         var restored = false
         if (!wasHome && !returnPkg.isNullOrBlank()) {
             restored = bringPackageToFront(context, returnPkg)
@@ -105,9 +90,7 @@ object AppLauncherEngine {
         if (!restored) {
             val acc = EdgeDockAccessibilityService.instance
             if (wasHome) {
-                if (acc == null || !acc.goHome()) {
-                    goHomeViaIntent(context)
-                }
+                if (acc == null || !acc.goHome()) goHomeViaIntent(context)
             } else if (acc != null) {
                 if (!acc.goBack()) acc.goHome()
             } else {
@@ -115,23 +98,19 @@ object AppLauncherEngine {
             }
         }
 
-        // 2. Apply exact Keep-Alive ON/OFF lifecycle policy for the dismissed Dock app
+        // 2. Apply Keep-Alive policy off the UI thread
         if (!dockPkg.isNullOrBlank() && shizukuReady) {
             if (!keepAlive) {
-                // Turn OFF keep-alive: clean force-stop 180ms after YouTube is back on top
                 mainHandler.postDelayed({
                     ShizukuBridge.execAsync(context, "am force-stop '$dockPkg'")
-                }, 180L)
-            } else if (wasPopup) {
-                // In Pop-up mode with keepAlive ON, move the floating task behind returnPkg cleanly
-                if (!returnPkg.isNullOrBlank()) {
-                    val retComp = context.packageManager.getLaunchIntentForPackage(returnPkg)?.component
-                    if (retComp != null) {
-                        val c = "${retComp.packageName}/${retComp.className}"
-                        mainHandler.postDelayed({
-                            ShizukuBridge.execAsync(context, "am start --windowingMode 1 -f 0x10020000 -n '$c'")
-                        }, 60L)
-                    }
+                }, 150L)
+            } else if (wasPopup && !returnPkg.isNullOrBlank()) {
+                val retComp = DockAppCache.getLaunchIntent(context, returnPkg)?.component
+                if (retComp != null) {
+                    val c = "${retComp.packageName}/${retComp.className}"
+                    mainHandler.postDelayed({
+                        ShizukuBridge.execAsync(context, "am start --windowingMode 1 -f 0x10020000 -n '$c'")
+                    }, 50L)
                 }
             }
         }
@@ -139,7 +118,7 @@ object AppLauncherEngine {
 
     private fun bringPackageToFront(context: Context, pkg: String): Boolean {
         return try {
-            val launch = context.packageManager.getLaunchIntentForPackage(pkg) ?: return false
+            val launch = DockAppCache.getLaunchIntent(context, pkg) ?: return false
             launch.addFlags(
                 Intent.FLAG_ACTIVITY_NEW_TASK or
                     Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or

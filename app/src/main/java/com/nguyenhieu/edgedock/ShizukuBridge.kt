@@ -31,6 +31,10 @@ object ShizukuBridge {
     private var shellService: IShizukuShellService? = null
 
     @Volatile
+    var isReadyCached: Boolean = false
+        private set
+
+    @Volatile
     private var bindInProgress = false
 
     @Volatile
@@ -45,6 +49,7 @@ object ShizukuBridge {
 
     private val binderDeadListener = Shizuku.OnBinderDeadListener {
         shellService = null
+        isReadyCached = false
         bindInProgress = false
         notifyListeners()
     }
@@ -89,7 +94,7 @@ object ShizukuBridge {
             } catch (_: Throwable) {
             }
         }
-        maybeBindService(ctx)
+        shellExecutor.execute { getStatus(ctx) }
     }
 
     fun addStatusListener(listener: () -> Unit) {
@@ -127,18 +132,23 @@ object ShizukuBridge {
             false
         }
         if (!binderAlive) {
+            isReadyCached = false
             return if (isShizukuAppInstalled(context)) Status.NOT_RUNNING else Status.NOT_INSTALLED
         }
         return try {
             if (Shizuku.isPreV11()) {
+                isReadyCached = false
                 Status.NOT_RUNNING
             } else if (Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED) {
+                isReadyCached = true
                 maybeBindService(context.applicationContext)
                 Status.READY
             } else {
+                isReadyCached = false
                 Status.NEED_PERMISSION
             }
         } catch (_: Throwable) {
+            isReadyCached = false
             Status.NOT_RUNNING
         }
     }

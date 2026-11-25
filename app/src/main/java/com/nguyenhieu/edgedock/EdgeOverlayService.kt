@@ -26,6 +26,7 @@ import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
+import android.view.animation.DecelerateInterpolator
 import android.widget.FrameLayout
 import android.widget.GridLayout
 import android.widget.ImageView
@@ -47,6 +48,9 @@ class EdgeOverlayService : Service() {
         var isRunning: Boolean = false
             private set
 
+        @Volatile
+        private var activeInstance: EdgeOverlayService? = null
+
         fun start(context: Context) {
             if (!Settings.canDrawOverlays(context)) return
             val i = Intent(context, EdgeOverlayService::class.java)
@@ -58,6 +62,11 @@ class EdgeOverlayService : Service() {
         }
 
         fun refresh(context: Context) {
+            val inst = activeInstance
+            if (inst != null) {
+                inst.mainHandler.post { inst.applyHandleLayoutAndStyle() }
+                return
+            }
             if (!isRunning) return
             try {
                 val i = Intent(context, EdgeOverlayService::class.java).apply {
@@ -75,11 +84,12 @@ class EdgeOverlayService : Service() {
 
     private lateinit var wm: WindowManager
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val fastDecel = DecelerateInterpolator(1.6f)
 
     private var handleRoot: FrameLayout? = null
     private var handleParams: WindowManager.LayoutParams? = null
     private var handleVisual: FrameLayout? = null
-    private var handleCloseGlyph: TextView? = null
+    private var handleCloseIcon: ImageView? = null
 
     private var dockBackdrop: FrameLayout? = null
     private var dockOpen: Boolean = false
@@ -93,8 +103,10 @@ class EdgeOverlayService : Service() {
     override fun onCreate() {
         super.onCreate()
         isRunning = true
+        activeInstance = this
         wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         ShizukuBridge.init(this)
+        DockAppCache.warmUp(this)
         DockSessionTracker.addListener(sessionListener)
         startForegroundCompat()
         attachHandleOverlay()
@@ -105,19 +117,19 @@ class EdgeOverlayService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
+        DockAppCache.invalidatePinnedApps(this)
         if (handleRoot == null) {
             attachHandleOverlay()
         } else {
             applyHandleLayoutAndStyle()
-            if (dockOpen) {
-                closeDockPanel()
-            }
+            if (dockOpen) closeDockPanel()
         }
         return START_STICKY
     }
 
     override fun onDestroy() {
         isRunning = false
+        if (activeInstance === this) activeInstance = null
         DockSessionTracker.removeListener(sessionListener)
         closeDockPanel()
         detachHandleOverlay()
@@ -168,7 +180,16 @@ class EdgeOverlayService : Service() {
 
     private fun screenHeightPx(): Int = resources.displayMetrics.heightPixels
 
-    private fun vibrateLight(ms: Long = 12L) {
+    private fun makeFlatIcon(resId: Int, sizeDp: Float, tintHex: String): ImageView {
+        return ImageView(this).apply {
+            setImageResource(resId)
+            setColorFilter(Color.parseColor(tintHex))
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            layoutParams = LinearLayout.LayoutParams(dp(sizeDp), dp(sizeDp))
+        }
+    }
+
+    private fun vibrateLight(ms: Long = 10L) {
         try {
             val vib: Vibrator? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 (getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager)?.defaultVibrator
@@ -189,20 +210,17 @@ class EdgeOverlayService : Service() {
 
         val root = FrameLayout(this)
         val visual = FrameLayout(this)
-        val closeGlyph = TextView(this).apply {
-            text = "✕"
-            setTextColor(Color.parseColor("#E2F5FF"))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
-            typeface = Typeface.DEFAULT_BOLD
-            gravity = Gravity.CENTER
+        val closeIcon = ImageView(this).apply {
+            setImageResource(R.drawable.ic_flat_close)
+            setColorFilter(Color.parseColor("#E2F5FF"))
+            scaleType = ImageView.ScaleType.FIT_CENTER
             visibility = View.GONE
         }
         visual.addView(
-            closeGlyph,
-            FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.MATCH_PARENT
-            )
+            closeIcon,
+            FrameLayout.LayoutParams(dp(13f), dp(13f)).apply {
+                gravity = Gravity.CENTER
+            }
         )
         root.addView(visual)
 
@@ -218,7 +236,7 @@ class EdgeOverlayService : Service() {
 
         handleRoot = root
         handleVisual = visual
-        handleCloseGlyph = closeGlyph
+        handleCloseIcon = closeIcon
         handleParams = params
 
         setupHandleTouchGestures(root)
@@ -238,7 +256,7 @@ class EdgeOverlayService : Service() {
         }
         handleRoot = null
         handleVisual = null
-        handleCloseGlyph = null
+        handleCloseIcon = null
         handleParams = null
     }
 
@@ -247,8 +265,8 @@ class EdgeOverlayService : Service() {
         val rightSide = DockPrefs.isRightSide(this)
         val activeSession = DockSessionTracker.isSessionActive()
 
-        val heightPx = if (activeSession) dp(60f) else dp(DockPrefs.getHandleHeightDp(this).toFloat())
-        val widthPx = if (activeSession) dp(30f) else dp(22f)
+        val heightPx = if (activeSession) dp(58f) else dp(DockPrefs.getHandleHeightDp(this).toFloat())
+        val widthPx = if (activeSession) dp(30f) else dp(24f)
         val yPx = ((screenHeightPx() - heightPx) * (DockPrefs.getHandleYPct(this) / 100f)).toInt()
 
         params.width = widthPx
@@ -274,19 +292,19 @@ class EdgeOverlayService : Service() {
 
     private fun updateHandleVisualInternal(rightSide: Boolean, activeSession: Boolean) {
         val visual = handleVisual ?: return
-        val glyph = handleCloseGlyph ?: return
+        val icon = handleCloseIcon ?: return
         val baseAlpha = DockPrefs.getHandleAlphaPct(this) / 100f
 
         if (activeSession) {
-            // Subtle dim half-pill indicator flush against the edge: 1-tap dismisses & returns to YouTube!
-            val lp = FrameLayout.LayoutParams(dp(26f), dp(52f)).apply {
+            val lp = FrameLayout.LayoutParams(dp(26f), dp(50f)).apply {
                 gravity = (if (rightSide) Gravity.END else Gravity.START) or Gravity.CENTER_VERTICAL
             }
             visual.layoutParams = lp
+            val rPx = dp(14f).toFloat()
             val radii = if (rightSide) {
-                floatArrayOf(dp(14f).toFloat(), dp(14f).toFloat(), 0f, 0f, 0f, 0f, dp(14f).toFloat(), dp(14f).toFloat())
+                floatArrayOf(rPx, rPx, 0f, 0f, 0f, 0f, rPx, rPx)
             } else {
-                floatArrayOf(0f, 0f, dp(14f).toFloat(), dp(14f).toFloat(), dp(14f).toFloat(), dp(14f).toFloat(), 0f, 0f)
+                floatArrayOf(0f, 0f, rPx, rPx, rPx, rPx, 0f, 0f)
             }
             visual.background = GradientDrawable().apply {
                 setColor(Color.parseColor("#CC161B24"))
@@ -294,9 +312,8 @@ class EdgeOverlayService : Service() {
                 cornerRadii = radii
             }
             visual.alpha = (baseAlpha + 0.14f).coerceIn(0.38f, 0.72f)
-            glyph.visibility = View.VISIBLE
+            icon.visibility = View.VISIBLE
         } else {
-            // Ultra-slim frosted Edge Handle (Samsung Edge Panel vibe)
             val hPx = dp(DockPrefs.getHandleHeightDp(this).toFloat())
             val lp = FrameLayout.LayoutParams(dp(4.8f), hPx).apply {
                 gravity = (if (rightSide) Gravity.END else Gravity.START) or Gravity.CENTER_VERTICAL
@@ -310,7 +327,7 @@ class EdgeOverlayService : Service() {
                 cornerRadius = dp(6f).toFloat()
             }
             visual.alpha = baseAlpha
-            glyph.visibility = View.GONE
+            icon.visibility = View.GONE
         }
     }
 
@@ -322,7 +339,7 @@ class EdgeOverlayService : Service() {
         var swipeTriggered = false
         val longPressRunnable = Runnable {
             dragMode = true
-            vibrateLight(20L)
+            vibrateLight(18L)
             handleVisual?.alpha = 0.92f
         }
 
@@ -335,7 +352,7 @@ class EdgeOverlayService : Service() {
                     startY = handleParams?.y ?: 0
                     dragMode = false
                     swipeTriggered = false
-                    mainHandler.postDelayed(longPressRunnable, 420L)
+                    mainHandler.postDelayed(longPressRunnable, 380L)
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
@@ -353,14 +370,15 @@ class EdgeOverlayService : Service() {
                         return@setOnTouchListener true
                     }
 
-                    if (abs(dx) > dp(10f) || abs(dy) > dp(10f)) {
+                    if (abs(dx) > dp(8f) || abs(dy) > dp(8f)) {
                         mainHandler.removeCallbacks(longPressRunnable)
                     }
 
+                    // Hair-trigger 11dp inward flick opens the Dock with 0ms delay!
                     val inwardDx = if (rightSide) -dx else dx
-                    if (!swipeTriggered && inwardDx > dp(18f) && inwardDx > abs(dy) * 1.15f) {
+                    if (!swipeTriggered && inwardDx > dp(11f) && inwardDx > abs(dy) * 1.05f) {
                         swipeTriggered = true
-                        vibrateLight(10L)
+                        vibrateLight(8L)
                         openDockPanel()
                     }
                     true
@@ -383,9 +401,8 @@ class EdgeOverlayService : Service() {
                         val dx = abs(ev.rawX - downRawX)
                         val dy = abs(ev.rawY - downRawY)
                         if (dx < dp(14f) && dy < dp(14f)) {
-                            vibrateLight(12L)
+                            vibrateLight(10L)
                             if (DockSessionTracker.isSessionActive()) {
-                                // 1-tap on the dim edge indicator -> close/dismiss & return to YouTube!
                                 AppLauncherEngine.dismissActiveDockApp(this)
                             } else {
                                 openDockPanel()
@@ -400,25 +417,25 @@ class EdgeOverlayService : Service() {
     }
 
     // =========================================================================
-    // WINDOW 2: MINIMALIST SLIDE-OUT DOCK PANEL
+    // WINDOW 2: 0ms RAM-CACHED SLIDE-OUT DOCK PANEL (100% FLAT VECTOR ICONS)
     // =========================================================================
     private fun openDockPanel() {
         if (dockOpen) return
         dockOpen = true
 
         val rightSide = DockPrefs.isRightSide(this)
-        val apps = DockPrefs.loadApps(this)
+        val apps = DockAppCache.getPinnedApps(this)
         val activePkg = DockSessionTracker.activeDockPackage
 
         val backdrop = FrameLayout(this).apply {
-            setBackgroundColor(Color.parseColor("#38000000"))
+            setBackgroundColor(Color.parseColor("#34000000"))
             setOnClickListener { closeDockPanel() }
         }
 
         val card = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             background = GradientDrawable().apply {
-                setColor(Color.parseColor("#F4181C25"))
+                setColor(Color.parseColor("#F5181C25"))
                 setStroke(dp(1f).coerceAtLeast(1), Color.parseColor("#2F384A"))
                 cornerRadius = dp(18f).toFloat()
             }
@@ -428,29 +445,31 @@ class EdgeOverlayService : Service() {
         }
 
         if (apps.isEmpty()) {
-            val emptyBtn = TextView(this).apply {
-                text = "+ Chọn app"
-                setTextColor(Color.parseColor("#38BDF8"))
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
-                typeface = Typeface.DEFAULT_BOLD
+            val emptyRow = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER
-                setPadding(dp(16f), dp(22f), dp(16f), dp(22f))
+                setPadding(dp(14f), dp(18f), dp(14f), dp(18f))
                 setOnClickListener {
                     closeDockPanel()
                     openSettingsActivity()
                 }
             }
-            card.addView(emptyBtn)
+            emptyRow.addView(makeFlatIcon(R.drawable.ic_flat_plus, 15f, "#38BDF8"))
+            emptyRow.addView(
+                TextView(this).apply {
+                    text = "Chọn app"
+                    setTextColor(Color.parseColor("#38BDF8"))
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                    typeface = Typeface.DEFAULT_BOLD
+                    setPadding(dp(6f), 0, 0, 0)
+                }
+            )
+            card.addView(emptyRow)
         } else {
             val cols = if (apps.size > 5) 2 else 1
-            val scroll = ScrollView(this).apply {
-                isVerticalScrollBarEnabled = false
-            }
-            val grid = GridLayout(this).apply {
-                columnCount = cols
-            }
+            val scroll = ScrollView(this).apply { isVerticalScrollBarEnabled = false }
+            val grid = GridLayout(this).apply { columnCount = cols }
 
-            val pm = packageManager
             for (entry in apps) {
                 val cell = LinearLayout(this).apply {
                     orientation = LinearLayout.VERTICAL
@@ -466,25 +485,23 @@ class EdgeOverlayService : Service() {
                 val iconWrap = FrameLayout(this)
                 val iconView = ImageView(this).apply {
                     scaleType = ImageView.ScaleType.FIT_CENTER
-                    try {
-                        setImageDrawable(pm.getApplicationIcon(entry.packageName))
-                    } catch (_: Throwable) {
+                    val cached = DockAppCache.getCachedIcon(entry.packageName)
+                    if (cached != null) {
+                        setImageDrawable(cached)
+                    } else {
                         setImageResource(R.drawable.ic_launcher_fg)
+                        DockAppCache.loadIconAsync(this@EdgeOverlayService, entry.packageName) { d ->
+                            if (d != null && isAttachedToWindow) setImageDrawable(d)
+                        }
                     }
                 }
                 iconWrap.addView(iconView, FrameLayout.LayoutParams(dp(42f), dp(42f)))
 
-                // Subtle Keep-Alive status dot at bottom-right of app icon
                 val dot = View(this).apply {
                     background = GradientDrawable().apply {
                         shape = GradientDrawable.OVAL
-                        if (entry.keepAlive) {
-                            setColor(Color.parseColor("#38BDF8"))
-                            setStroke(dp(1.5f).coerceAtLeast(1), Color.parseColor("#181C25"))
-                        } else {
-                            setColor(Color.parseColor("#475569"))
-                            setStroke(dp(1.5f).coerceAtLeast(1), Color.parseColor("#181C25"))
-                        }
+                        setColor(Color.parseColor(if (entry.keepAlive) "#38BDF8" else "#475569"))
+                        setStroke(dp(1.5f).coerceAtLeast(1), Color.parseColor("#181C25"))
                     }
                 }
                 iconWrap.addView(
@@ -507,17 +524,17 @@ class EdgeOverlayService : Service() {
                 cell.addView(label, LinearLayout.LayoutParams(dp(64f), LinearLayout.LayoutParams.WRAP_CONTENT))
 
                 cell.setOnClickListener {
-                    vibrateLight(10L)
+                    vibrateLight(8L)
                     closeDockPanel()
-                    AppLauncherEngine.launchDockApp(this, entry)
+                    AppLauncherEngine.launchDockApp(this@EdgeOverlayService, entry)
                 }
 
-                // Long-press any app icon in Dock to toggle Keep-Alive ON/OFF on the spot!
                 cell.setOnLongClickListener {
-                    vibrateLight(18L)
-                    val nowOn = DockPrefs.toggleKeepAlive(this, entry.packageName)
+                    vibrateLight(16L)
+                    val nowOn = DockPrefs.toggleKeepAlive(this@EdgeOverlayService, entry.packageName)
+                    DockAppCache.invalidatePinnedApps(this@EdgeOverlayService)
                     val msg = if (nowOn) "Chạy ngầm BẬT · ${entry.label}" else "Chạy ngầm TẮT · ${entry.label}"
-                    Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this@EdgeOverlayService, msg, Toast.LENGTH_SHORT).show()
                     closeDockPanel()
                     openDockPanel()
                     true
@@ -542,10 +559,7 @@ class EdgeOverlayService : Service() {
             )
         }
 
-        // Minimalist divider + action icons (Return/Close if active + Settings)
-        val divider = View(this).apply {
-            setBackgroundColor(Color.parseColor("#2A3142"))
-        }
+        val divider = View(this).apply { setBackgroundColor(Color.parseColor("#2A3142")) }
         card.addView(
             divider,
             LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(1f).coerceAtLeast(1)).apply {
@@ -560,39 +574,36 @@ class EdgeOverlayService : Service() {
         }
 
         if (DockSessionTracker.isSessionActive()) {
-            val closeBtn = TextView(this).apply {
-                text = "✕"
-                setTextColor(Color.parseColor("#38BDF8"))
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-                typeface = Typeface.DEFAULT_BOLD
-                gravity = Gravity.CENTER
+            val closeBtn = FrameLayout(this).apply {
                 background = GradientDrawable().apply {
                     setColor(Color.parseColor("#21344B"))
                     cornerRadius = dp(9f).toFloat()
                 }
+                addView(
+                    makeFlatIcon(R.drawable.ic_flat_close, 15f, "#38BDF8"),
+                    FrameLayout.LayoutParams(dp(15f), dp(15f)).apply { gravity = Gravity.CENTER }
+                )
                 setOnClickListener {
-                    vibrateLight(12L)
+                    vibrateLight(10L)
                     closeDockPanel()
                     AppLauncherEngine.dismissActiveDockApp(this@EdgeOverlayService)
                 }
             }
             footer.addView(
                 closeBtn,
-                LinearLayout.LayoutParams(dp(34f), dp(30f)).apply {
-                    marginEnd = dp(6f)
-                }
+                LinearLayout.LayoutParams(dp(34f), dp(30f)).apply { marginEnd = dp(6f) }
             )
         }
 
-        val settingsBtn = TextView(this).apply {
-            text = "⚙"
-            setTextColor(Color.parseColor("#94A3B8"))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-            gravity = Gravity.CENTER
+        val settingsBtn = FrameLayout(this).apply {
             background = GradientDrawable().apply {
                 setColor(Color.parseColor("#222836"))
                 cornerRadius = dp(9f).toFloat()
             }
+            addView(
+                makeFlatIcon(R.drawable.ic_flat_settings, 15f, "#94A3B8"),
+                FrameLayout.LayoutParams(dp(15f), dp(15f)).apply { gravity = Gravity.CENTER }
+            )
             setOnClickListener {
                 vibrateLight(8L)
                 closeDockPanel()
@@ -612,10 +623,10 @@ class EdgeOverlayService : Service() {
         }
         backdrop.addView(card, cardLp)
 
-        // Smooth quick slide-in animation
+        // Snappy 70ms slide-in (no sluggish lag)
         card.alpha = 0f
-        card.translationX = if (rightSide) dp(24f).toFloat() else -dp(24f).toFloat()
-        card.animate().alpha(1f).translationX(0f).setDuration(140L).start()
+        card.translationX = if (rightSide) dp(16f).toFloat() else -dp(16f).toFloat()
+        card.animate().alpha(1f).translationX(0f).setDuration(70L).setInterpolator(fastDecel).start()
 
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
@@ -639,8 +650,12 @@ class EdgeOverlayService : Service() {
         dockBackdrop = null
         dockOpen = false
         try {
-            wm.removeView(bd)
+            wm.removeViewImmediate(bd)
         } catch (_: Throwable) {
+            try {
+                wm.removeView(bd)
+            } catch (_: Throwable) {
+            }
         }
     }
 
