@@ -422,11 +422,12 @@ class EdgeOverlayService : Service() {
                         mainHandler.removeCallbacks(longPressRunnable)
                     }
 
-                    // Hair-trigger 11dp swipe:
-                    // - Idle (e.g. on YouTube): opens Dock immediately!
-                    // - Active (inside Dock app like Anti): swiping back immediately returns to YouTube!
+                    // Swipe-only trigger for opening Dock (avoids accidental edge taps):
+                    // - Idle: swipe inward >= 14dp to open Dock Panel
+                    // - Active (showing X): swipe inward or tap X to return to previous app
                     val inwardDx = if (rightSide) -dx else dx
-                    if (!swipeTriggered && inwardDx > dp(11f) && inwardDx > abs(dy) * 1.05f) {
+                    val swipeThreshold = if (DockSessionTracker.isSessionActive()) dp(12f) else dp(14f)
+                    if (!swipeTriggered && inwardDx > swipeThreshold && inwardDx > abs(dy) * 1.15f) {
                         swipeTriggered = true
                         vibrateLight(8L)
                         if (DockSessionTracker.isSessionActive()) {
@@ -459,17 +460,12 @@ class EdgeOverlayService : Service() {
                         return@setOnTouchListener true
                     }
 
-                    if (!swipeTriggered) {
+                    if (!swipeTriggered && DockSessionTracker.isSessionActive()) {
                         val dx = abs(ev.rawX - downRawX)
                         val dy = abs(ev.rawY - downRawY)
-                        val tapLimit = if (DockSessionTracker.isSessionActive()) dp(26f) else dp(15f)
-                        if (dx < tapLimit && dy < tapLimit) {
+                        if (dx < dp(26f) && dy < dp(26f)) {
                             vibrateLight(10L)
-                            if (DockSessionTracker.isSessionActive()) {
-                                AppLauncherEngine.dismissActiveDockApp(this)
-                            } else {
-                                openDockPanel()
-                            }
+                            AppLauncherEngine.dismissActiveDockApp(this)
                         }
                     }
                     true
