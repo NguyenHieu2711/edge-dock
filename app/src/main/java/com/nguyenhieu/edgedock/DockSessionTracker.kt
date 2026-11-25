@@ -38,6 +38,9 @@ object DockSessionTracker {
     @Volatile
     var sessionStartedAt: Long = 0L
 
+    @Volatile
+    var dockAppSeenOnScreen: Boolean = false
+
     fun isSessionActive(): Boolean = !activeDockPackage.isNullOrBlank()
 
     fun rememberDockTaskId(pkg: String, taskId: Int) {
@@ -94,7 +97,13 @@ object DockSessionTracker {
         }
         activeDockPackage = dockPkg
         sessionStartedAt = System.currentTimeMillis()
+        dockAppSeenOnScreen = false
         notifyStateChanged()
+    }
+
+    fun markActiveAppVisible(pkg: String?) {
+        val active = activeDockPackage ?: return
+        if (pkg == active) dockAppSeenOnScreen = true
     }
 
     fun clearSession() {
@@ -104,6 +113,7 @@ object DockSessionTracker {
         returnTargetTaskId = -1
         returnWasHome = false
         sessionStartedAt = 0L
+        dockAppSeenOnScreen = false
         snapshotUnderlyingPackage = null
         snapshotUnderlyingTaskId = -1
         snapshotWasHome = false
@@ -113,9 +123,15 @@ object DockSessionTracker {
     fun onForegroundPackageChanged(pkg: String, isLauncher: Boolean) {
         currentForegroundPackage = pkg
         val active = activeDockPackage ?: return
+        if (pkg == active) {
+            dockAppSeenOnScreen = true
+            return
+        }
         val elapsed = System.currentTimeMillis() - sessionStartedAt
-        if (elapsed < 550L) return
-        if (isLauncher || pkg != active) {
+        // Give slow-launching apps up to 3.5s before clearing session on transient window changes
+        if (!dockAppSeenOnScreen && elapsed < 3500L) return
+        if (elapsed < 1200L) return
+        if (isLauncher || pkg == returnTargetPackage || elapsed >= 2200L) {
             clearSession()
         }
     }

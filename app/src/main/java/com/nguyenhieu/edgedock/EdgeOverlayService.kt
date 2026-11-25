@@ -93,6 +93,7 @@ class EdgeOverlayService : Service() {
 
     private var dockBackdrop: FrameLayout? = null
     private var dockOpen: Boolean = false
+    private var watchdogMissCount: Int = 0
 
     private val sessionListener: () -> Unit = {
         updateHandleAppearance()
@@ -103,19 +104,34 @@ class EdgeOverlayService : Service() {
         override fun run() {
             val activePkg = DockSessionTracker.activeDockPackage ?: return
             val elapsed = System.currentTimeMillis() - DockSessionTracker.sessionStartedAt
-            if (elapsed >= 1200L) {
+            val readyToVerify = DockSessionTracker.dockAppSeenOnScreen || elapsed >= 3500L
+            if (readyToVerify) {
                 val acc = EdgeDockAccessibilityService.instance
                 if (acc != null) {
-                    if (!acc.isPackageVisibleNow(activePkg)) {
-                        DockSessionTracker.clearSession()
-                        return
+                    if (acc.isPackageVisibleNow(activePkg)) {
+                        DockSessionTracker.markActiveAppVisible(activePkg)
+                        watchdogMissCount = 0
+                    } else {
+                        watchdogMissCount++
+                        if (watchdogMissCount >= 2) {
+                            DockSessionTracker.clearSession()
+                            return
+                        }
                     }
                 } else if (ShizukuBridge.isReadyCached) {
                     val ignoreCsv = "$packageName,com.android.systemui,android"
                     ShizukuBridge.getTopTaskAsync(this@EdgeOverlayService, ignoreCsv) { _, topPkg ->
                         val curActive = DockSessionTracker.activeDockPackage
-                        if (curActive != null && topPkg.isNotBlank() && topPkg != curActive) {
-                            DockSessionTracker.clearSession()
+                        if (curActive != null && topPkg.isNotBlank()) {
+                            if (topPkg == curActive) {
+                                DockSessionTracker.markActiveAppVisible(curActive)
+                                watchdogMissCount = 0
+                            } else {
+                                watchdogMissCount++
+                                if (watchdogMissCount >= 2) {
+                                    DockSessionTracker.clearSession()
+                                }
+                            }
                         }
                     }
                 }
@@ -128,6 +144,7 @@ class EdgeOverlayService : Service() {
 
     private fun syncSessionWatchdog() {
         mainHandler.removeCallbacks(sessionWatchdog)
+        watchdogMissCount = 0
         if (DockSessionTracker.isSessionActive()) {
             mainHandler.postDelayed(sessionWatchdog, 1200L)
         }
@@ -254,7 +271,7 @@ class EdgeOverlayService : Service() {
         }
         visual.addView(
             closeIcon,
-            FrameLayout.LayoutParams(dp(13f), dp(13f)).apply {
+            FrameLayout.LayoutParams(dp(15f), dp(15f)).apply {
                 gravity = Gravity.CENTER
             }
         )
@@ -301,8 +318,8 @@ class EdgeOverlayService : Service() {
         val rightSide = DockPrefs.isRightSide(this)
         val activeSession = DockSessionTracker.isSessionActive()
 
-        val heightPx = if (activeSession) dp(68f) else dp(DockPrefs.getHandleHeightDp(this).toFloat())
-        val widthPx = if (activeSession) dp(38f) else dp(26f)
+        val heightPx = if (activeSession) dp(72f) else dp(DockPrefs.getHandleHeightDp(this).toFloat())
+        val widthPx = if (activeSession) dp(42f) else dp(26f)
         val yPx = ((screenHeightPx() - heightPx) * (DockPrefs.getHandleYPct(this) / 100f)).toInt()
 
         params.width = widthPx
@@ -332,7 +349,7 @@ class EdgeOverlayService : Service() {
         val baseAlpha = DockPrefs.getHandleAlphaPct(this) / 100f
 
         if (activeSession) {
-            val lp = FrameLayout.LayoutParams(dp(26f), dp(50f)).apply {
+            val lp = FrameLayout.LayoutParams(dp(28f), dp(54f)).apply {
                 gravity = (if (rightSide) Gravity.END else Gravity.START) or Gravity.CENTER_VERTICAL
             }
             visual.layoutParams = lp
@@ -343,11 +360,12 @@ class EdgeOverlayService : Service() {
                 floatArrayOf(0f, 0f, rPx, rPx, rPx, rPx, 0f, 0f)
             }
             visual.background = GradientDrawable().apply {
-                setColor(Color.parseColor("#CC161B24"))
-                setStroke(dp(1.2f).coerceAtLeast(1), Color.parseColor("#9938BDF8"))
+                setColor(Color.parseColor("#E8141821"))
+                setStroke(dp(1.4f).coerceAtLeast(1), Color.parseColor("#B338BDF8"))
                 cornerRadii = radii
             }
-            visual.alpha = (baseAlpha + 0.14f).coerceIn(0.38f, 0.72f)
+            visual.alpha = (baseAlpha + 0.45f).coerceIn(0.82f, 0.96f)
+            icon.setColorFilter(Color.parseColor("#F1F5F9"))
             icon.visibility = View.VISIBLE
         } else {
             val hPx = dp(DockPrefs.getHandleHeightDp(this).toFloat())
