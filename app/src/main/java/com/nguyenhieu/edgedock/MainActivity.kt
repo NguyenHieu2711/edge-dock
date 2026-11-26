@@ -60,6 +60,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var masterSwitch: Switch
     private lateinit var statusOverlayBadge: TextView
     private lateinit var statusAccessBadge: TextView
+    private lateinit var excludedAppsBadge: TextView
     private lateinit var appsContainer: LinearLayout
     private lateinit var sideLeftBtn: TextView
     private lateinit var sideRightBtn: TextView
@@ -334,6 +335,28 @@ class MainActivity : AppCompatActivity() {
             DockPrefs.setHandleAlphaPct(this, value)
             EdgeOverlayService.refresh(this)
         }
+        addDivider(cfgCard)
+        addToggleRow(cfgCard, "Vuốt-thả 1 nét mở app", DockPrefs.isNoLiftLaunchEnabled(this)) { on ->
+            DockPrefs.setNoLiftLaunchEnabled(this, on)
+        }
+        addDivider(cfgCard)
+        addToggleRow(cfgCard, "Vuốt chéo (Lên: App trước · Xuống: Ghi nhanh)", DockPrefs.isDiagonalGesturesEnabled(this)) { on ->
+            DockPrefs.setDiagonalGesturesEnabled(this, on)
+        }
+        addDivider(cfgCard)
+        addToggleRow(cfgCard, "Tự ẩn khi xoay ngang", DockPrefs.isAutoHideLandscape(this)) { on ->
+            DockPrefs.setAutoHideLandscape(this, on)
+            EdgeOverlayService.refresh(this)
+        }
+        addDivider(cfgCard)
+        addToggleRow(cfgCard, "Tự né bàn phím", DockPrefs.isAvoidKeyboard(this)) { on ->
+            DockPrefs.setAvoidKeyboard(this, on)
+            EdgeOverlayService.refresh(this)
+        }
+        addDivider(cfgCard)
+        excludedAppsBadge = addStatusRow(cfgCard, "Ẩn trong app (Game / Vẽ...)", false) {
+            openExcludedAppsPickerDialog()
+        }
 
         rootList.addView(cfgCard, cardLp(topDp = 0f))
 
@@ -489,6 +512,9 @@ class MainActivity : AppCompatActivity() {
 
         val accOk = EdgeDockAccessibilityService.isEnabled(this)
         styleBadge(statusAccessBadge, if (accOk) "Đã bật" else "Cấp quyền", accOk)
+
+        val exCount = DockPrefs.getExcludedPackages(this).size
+        styleBadge(excludedAppsBadge, if (exCount > 0) "$exCount app" else "Chọn", exCount > 0)
     }
 
     private fun refreshSideButtons() {
@@ -780,6 +806,168 @@ class MainActivity : AppCompatActivity() {
             DockPrefs.saveApps(this, finalList)
             DockAppCache.invalidatePinnedApps(this)
             renderPinnedAppsList()
+            EdgeOverlayService.refresh(this)
+            dlg.dismiss()
+        }
+        dlg.show()
+
+        DockAppCache.loadInstalledAppsAsync(this) { loaded ->
+            allApps = loaded
+            applyFilter(searchBox.text.toString())
+        }
+    }
+
+    private fun openExcludedAppsPickerDialog() {
+        val selectedPkgs = DockPrefs.getExcludedPackages(this).toMutableSet()
+        var allApps: List<Pair<String, String>> = emptyList()
+        var filteredApps: List<Pair<String, String>> = emptyList()
+
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.parseColor("#181C25"))
+            setPadding(dp(14f), dp(14f), dp(14f), dp(10f))
+        }
+
+        val searchBox = EditText(this).apply {
+            hint = "Tìm app cần ẩn thanh gạt..."
+            setHintTextColor(Color.parseColor("#64748B"))
+            setTextColor(Color.parseColor("#F1F5F9"))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            background = cardBg("#14161C", "#2A3142", 10f)
+            setPadding(dp(12f), dp(9f), dp(12f), dp(9f))
+            isSingleLine = true
+        }
+        root.addView(searchBox, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+
+        val adapter = object : BaseAdapter() {
+            override fun getCount(): Int = filteredApps.size
+            override fun getItem(pos: Int): Pair<String, String> = filteredApps[pos]
+            override fun getItemId(pos: Int): Long = pos.toLong()
+
+            override fun getView(pos: Int, convertView: View?, parent: ViewGroup?): View {
+                val row: LinearLayout
+                val iconIv: ImageView
+                val titleTv: TextView
+                val stateIv: ImageView
+
+                if (convertView == null) {
+                    row = LinearLayout(this@MainActivity).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.CENTER_VERTICAL
+                        setPadding(dp(8f), dp(8f), dp(8f), dp(8f))
+                    }
+                    iconIv = ImageView(this@MainActivity).apply { scaleType = ImageView.ScaleType.FIT_CENTER }
+                    titleTv = TextView(this@MainActivity).apply {
+                        setTextColor(Color.parseColor("#F1F5F9"))
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                        maxLines = 1
+                        ellipsize = TextUtils.TruncateAt.END
+                    }
+                    stateIv = ImageView(this@MainActivity).apply { scaleType = ImageView.ScaleType.FIT_CENTER }
+                    row.addView(iconIv, LinearLayout.LayoutParams(dp(30f), dp(30f)).apply { marginEnd = dp(10f) })
+                    row.addView(titleTv, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+                    row.addView(stateIv, LinearLayout.LayoutParams(dp(16f), dp(16f)).apply { marginStart = dp(8f) })
+                    row.tag = Triple(iconIv, titleTv, stateIv)
+                } else {
+                    row = convertView as LinearLayout
+                    @Suppress("UNCHECKED_CAST")
+                    val holder = row.tag as Triple<ImageView, TextView, ImageView>
+                    iconIv = holder.first
+                    titleTv = holder.second
+                    stateIv = holder.third
+                }
+
+                val (pkg, label) = filteredApps[pos]
+                val isSel = pkg in selectedPkgs
+                row.background = GradientDrawable().apply {
+                    setColor(if (isSel) Color.parseColor("#1E2C40") else Color.TRANSPARENT)
+                    cornerRadius = dp(9f).toFloat()
+                }
+                titleTv.text = label
+                stateIv.setImageResource(if (isSel) R.drawable.ic_flat_check else R.drawable.ic_flat_plus)
+                stateIv.setColorFilter(Color.parseColor(if (isSel) "#38BDF8" else "#64748B"))
+
+                iconIv.tag = pkg
+                val cached = DockAppCache.getCachedIcon(pkg)
+                if (cached != null) {
+                    iconIv.setImageDrawable(cached)
+                } else {
+                    iconIv.setImageResource(R.drawable.ic_launcher_fg)
+                    DockAppCache.loadIconAsync(this@MainActivity, pkg) { d ->
+                        if (d != null && iconIv.tag == pkg) iconIv.setImageDrawable(d)
+                    }
+                }
+                return row
+            }
+        }
+
+        val listView = ListView(this).apply {
+            this.adapter = adapter
+            divider = null
+            dividerHeight = dp(2f)
+            setOnItemClickListener { _, _, pos, _ ->
+                if (pos !in filteredApps.indices) return@setOnItemClickListener
+                val (pkg, _) = filteredApps[pos]
+                if (pkg in selectedPkgs) selectedPkgs.remove(pkg) else selectedPkgs.add(pkg)
+                adapter.notifyDataSetChanged()
+            }
+        }
+        root.addView(
+            listView,
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(360f)).apply {
+                topMargin = dp(8f)
+            }
+        )
+
+        fun applyFilter(qRaw: String) {
+            val q = qRaw.trim().lowercase()
+            filteredApps = if (q.isEmpty()) allApps else allApps.filter {
+                it.second.lowercase().contains(q) || it.first.lowercase().contains(q)
+            }
+            adapter.notifyDataSetChanged()
+        }
+
+        searchBox.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                applyFilter(s?.toString().orEmpty())
+            }
+            override fun afterTextChanged(s: Editable?) {}
+        })
+
+        val btnRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.END
+            setPadding(0, dp(10f), 0, dp(2f))
+        }
+        val cancelBtn = TextView(this).apply {
+            text = "Hủy"
+            setTextColor(Color.parseColor("#94A3B8"))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(dp(16f), dp(8f), dp(16f), dp(8f))
+        }
+        val saveBtn = TextView(this).apply {
+            text = "Xong"
+            setTextColor(Color.parseColor("#061826"))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
+            typeface = Typeface.DEFAULT_BOLD
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#38BDF8"))
+                cornerRadius = dp(99f).toFloat()
+            }
+            setPadding(dp(18f), dp(8f), dp(18f), dp(8f))
+        }
+        btnRow.addView(cancelBtn)
+        btnRow.addView(saveBtn)
+        root.addView(btnRow)
+
+        val dlg = AlertDialog.Builder(this).setView(root).create()
+        dlg.window?.setBackgroundDrawable(cardBg("#181C25", "#2F384A", 16f))
+        cancelBtn.setOnClickListener { dlg.dismiss() }
+        saveBtn.setOnClickListener {
+            DockPrefs.setExcludedPackages(this, selectedPkgs)
+            refreshStatusBadges()
             EdgeOverlayService.refresh(this)
             dlg.dismiss()
         }

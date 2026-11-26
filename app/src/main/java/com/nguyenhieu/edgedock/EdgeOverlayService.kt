@@ -8,6 +8,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Typeface
@@ -36,6 +37,7 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import kotlin.math.abs
+import kotlin.math.hypot
 
 class EdgeOverlayService : Service() {
 
@@ -80,7 +82,22 @@ class EdgeOverlayService : Service() {
         fun stop(context: Context) {
             context.stopService(Intent(context, EdgeOverlayService::class.java))
         }
+
+        fun onContextStateChanged(foregroundPkg: String?, imeTopPx: Int) {
+            val inst = activeInstance ?: return
+            inst.mainHandler.post {
+                inst.handleContextUpdate(foregroundPkg, imeTopPx)
+            }
+        }
     }
+
+    private data class DockHitTarget(
+        val view: View,
+        val normalBgColor: Int,
+        val normalCornerDp: Float,
+        val labelView: TextView? = null,
+        val onInvoke: () -> Unit
+    )
 
     private lateinit var wm: WindowManager
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -91,9 +108,21 @@ class EdgeOverlayService : Service() {
     private var handleVisual: FrameLayout? = null
     private var handleCloseIcon: ImageView? = null
 
+    private var gestureHintRoot: FrameLayout? = null
+    private var gestureHintPill: TextView? = null
+    private var gestureHintParams: WindowManager.LayoutParams? = null
+
     private var dockBackdrop: FrameLayout? = null
     private var dockOpen: Boolean = false
+    private var dockOpenedAtMs: Long = 0L
+    private val dockHitTargets = mutableListOf<DockHitTarget>()
+    private var hoveredDockTarget: DockHitTarget? = null
     private var watchdogMissCount: Int = 0
+
+    private var isLandscapeNow: Boolean = false
+    private var currentForegroundPkg: String? = null
+    private var currentImeTopPx: Int = 0
+    private var handleDragInProgress: Boolean = false
 
     private val sessionListener: () -> Unit = {
         updateHandleAppearance()
@@ -141,10 +170,37 @@ class EdgeOverlayService : Service() {
         isRunning = true
         activeInstance = this
         wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        isLandscapeNow = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+        val acc = EdgeDockAccessibilityService.instance
+        currentForegroundPkg = acc?.detectTopAppPackageNow() ?: DockSessionTracker.currentForegroundPackage
+        currentImeTopPx = acc?.detectImeTopPx() ?: 0
         DockAppCache.warmUp(this)
         DockSessionTracker.addListener(sessionListener)
         startForegroundCompat()
         attachHandleOverlay()
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        val land = newConfig.orientation == Configuration.ORIENTATION_LANDSCAPE
+        if (land != isLandscapeNow) {
+            isLandscapeNow = land
+            if (land && DockPrefs.isAutoHideLandscape(this) && !DockSessionTracker.isSessionActive()) {
+                closeDockPanel()
+                hideGestureHint()
+            }
+            applyHandleLayoutAndStyle()
+        }
+    }
+
+    private fun handleContextUpdate(foregroundPkg: String?, imeTopPx: Int) {
+        val cleanIme = imeTopPx.coerceAtLeast(0)
+        if (foregroundPkg == currentForegroundPkg && cleanIme == currentImeTopPx) return
+        currentForegroundPkg = foregroundPkg
+        currentImeTopPx = cleanIme
+        if (!handleDragInProgress) {
+            applyHandleLayoutAndStyle()
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -167,6 +223,7 @@ class EdgeOverlayService : Service() {
         if (activeInstance === this) activeInstance = null
         mainHandler.removeCallbacks(sessionWatchdog)
         DockSessionTracker.removeListener(sessionListener)
+        hideGestureHint()
         closeDockPanel()
         detachHandleOverlay()
         super.onDestroy()
@@ -298,12 +355,32 @@ class EdgeOverlayService : Service() {
 
     private fun applyHandleLayoutAndStyle() {
         val params = handleParams ?: return
+        val r = handleRoot ?: return
         val rightSide = DockPrefs.isRightSide(this)
         val activeSession = DockSessionTracker.isSessionActive()
 
+        val hideForLandscape = !activeSession && DockPrefs.isAutoHideLandscape(this) && isLandscapeNow
+        val fgPkg = currentForegroundPkg
+        val hideForExcluded = !activeSession && !fgPkg.isNullOrBlank() && DockPrefs.isPackageExcluded(this, fgPkg)
+        if (hideForLandscape || hideForExcluded) {
+            if (r.visibility != View.GONE) {
+                r.visibility = View.GONE
+            }
+            if (dockOpen) closeDockPanel()
+            hideGestureHint()
+            return
+        }
+        if (r.visibility != View.VISIBLE) {
+            r.visibility = View.VISIBLE
+        }
+
         val heightPx = if (activeSession) dp(72f) else dp(DockPrefs.getHandleHeightDp(this).toFloat())
         val widthPx = if (activeSession) dp(42f) else dp(26f)
-        val yPx = ((screenHeightPx() - heightPx) * (DockPrefs.getHandleYPct(this) / 100f)).toInt()
+        var yPx = ((screenHeightPx() - heightPx) * (DockPrefs.getHandleYPct(this) / 100f)).toInt()
+        if (DockPrefs.isAvoidKeyboard(this) && currentImeTopPx > 0) {
+            val maxAboveIme = (currentImeTopPx - heightPx - dp(16f)).coerceAtLeast(dp(36f))
+            if (yPx > maxAboveIme) yPx = maxAboveIme
+        }
 
         params.width = widthPx
         params.height = heightPx
@@ -313,8 +390,7 @@ class EdgeOverlayService : Service() {
 
         updateHandleVisualInternal(rightSide, activeSession)
 
-        val r = handleRoot
-        if (r != null && r.isAttachedToWindow) {
+        if (r.isAttachedToWindow) {
             try {
                 wm.updateViewLayout(r, params)
             } catch (_: Throwable) {
@@ -368,20 +444,177 @@ class EdgeOverlayService : Service() {
         }
     }
 
+    private fun showGestureHint(action: Int, armed: Boolean, anchorRawY: Int) {
+        val rightSide = DockPrefs.isRightSide(this)
+        val label = if (action == 1) "⇄ App trước" else "✎ Ghi nhanh"
+
+        if (gestureHintRoot == null) {
+            val container = FrameLayout(this)
+            val pill = TextView(this).apply {
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+                typeface = Typeface.DEFAULT_BOLD
+                setPadding(dp(13f), dp(7f), dp(13f), dp(7f))
+                elevation = dp(8f).toFloat()
+            }
+            container.addView(
+                pill,
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    FrameLayout.LayoutParams.WRAP_CONTENT
+                )
+            )
+            val params = WindowManager.LayoutParams(
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                PixelFormat.TRANSLUCENT
+            )
+            gestureHintRoot = container
+            gestureHintPill = pill
+            gestureHintParams = params
+            try {
+                wm.addView(container, params)
+            } catch (_: Throwable) {
+                gestureHintRoot = null
+                gestureHintPill = null
+                gestureHintParams = null
+                return
+            }
+        }
+
+        val pill = gestureHintPill ?: return
+        val params = gestureHintParams ?: return
+        val root = gestureHintRoot ?: return
+
+        pill.text = label
+        pill.setTextColor(Color.parseColor(if (armed) "#F8FAFC" else "#94A3B8"))
+        pill.background = GradientDrawable().apply {
+            setColor(Color.parseColor(if (armed) "#F217283D" else "#E8181C25"))
+            setStroke(dp(1.2f).coerceAtLeast(1), Color.parseColor(if (armed) "#38BDF8" else "#334155"))
+            cornerRadius = dp(99f).toFloat()
+        }
+        pill.scaleX = if (armed) 1.04f else 0.96f
+        pill.scaleY = if (armed) 1.04f else 0.96f
+
+        params.gravity = (if (rightSide) Gravity.END else Gravity.START) or Gravity.TOP
+        params.x = dp(28f)
+        params.y = (anchorRawY - dp(22f)).coerceIn(dp(44f), (screenHeightPx() - dp(80f)).coerceAtLeast(dp(48f)))
+
+        if (root.isAttachedToWindow) {
+            try {
+                wm.updateViewLayout(root, params)
+            } catch (_: Throwable) {
+            }
+        }
+    }
+
+    private fun hideGestureHint() {
+        val root = gestureHintRoot ?: return
+        gestureHintRoot = null
+        gestureHintPill = null
+        gestureHintParams = null
+        try {
+            wm.removeViewImmediate(root)
+        } catch (_: Throwable) {
+            try {
+                wm.removeView(root)
+            } catch (_: Throwable) {
+            }
+        }
+    }
+
+    private fun applyTargetHoverStyle(target: DockHitTarget, hovered: Boolean) {
+        val v = target.view
+        v.animate().cancel()
+        if (hovered) {
+            v.animate().scaleX(1.13f).scaleY(1.13f).setDuration(55L).setInterpolator(fastDecel).start()
+            v.background = GradientDrawable().apply {
+                setColor(Color.parseColor("#283E59"))
+                setStroke(dp(1.3f).coerceAtLeast(1), Color.parseColor("#38BDF8"))
+                cornerRadius = dp(target.normalCornerDp).toFloat()
+            }
+            target.labelView?.setTextColor(Color.parseColor("#38BDF8"))
+        } else {
+            v.animate().scaleX(1f).scaleY(1f).setDuration(55L).setInterpolator(fastDecel).start()
+            v.background = GradientDrawable().apply {
+                setColor(target.normalBgColor)
+                cornerRadius = dp(target.normalCornerDp).toFloat()
+            }
+            target.labelView?.setTextColor(Color.parseColor("#E2E8F0"))
+        }
+    }
+
+    private fun updateContinuousDockHover(rawX: Float, rawY: Float) {
+        if (!dockOpen) return
+        // Brief arming gate prevents accidental launches on fast horizontal flick-and-release
+        if (System.currentTimeMillis() - dockOpenedAtMs < 115L) return
+
+        val slop = dp(4f)
+        val loc = IntArray(2)
+        var hit: DockHitTarget? = null
+        for (t in dockHitTargets) {
+            val v = t.view
+            if (!v.isAttachedToWindow || v.width <= 0 || v.height <= 0) continue
+            v.getLocationOnScreen(loc)
+            val left = loc[0] - slop
+            val top = loc[1] - slop
+            val right = loc[0] + v.width + slop
+            val bottom = loc[1] + v.height + slop
+            if (rawX >= left && rawX <= right && rawY >= top && rawY <= bottom) {
+                hit = t
+                break
+            }
+        }
+
+        if (hit !== hoveredDockTarget) {
+            hoveredDockTarget?.let { applyTargetHoverStyle(it, false) }
+            hoveredDockTarget = hit
+            if (hit != null) {
+                applyTargetHoverStyle(hit, true)
+                vibrateLight(6L)
+            }
+        }
+    }
+
+    private fun clearContinuousDockHover() {
+        hoveredDockTarget?.let { applyTargetHoverStyle(it, false) }
+        hoveredDockTarget = null
+    }
+
+    private fun finishContinuousDockGesture() {
+        val selected = hoveredDockTarget
+        clearContinuousDockHover()
+        if (selected != null) {
+            vibrateLight(10L)
+            selected.onInvoke()
+        }
+    }
+
     private fun setupHandleTouchGestures(root: FrameLayout) {
         var downRawX = 0f
         var downRawY = 0f
         var startY = 0
         var dragMode = false
         var swipeTriggered = false
+        var continuousDockTracking = false
+        var pendingDiagAction = 0 // 0=none, 1=prevApp (diag up), 2=quickNote (diag down)
+        var lastDiagArmed = false
+
         val longPressRunnable = Runnable {
             if (DockSessionTracker.isSessionActive()) {
                 // Holding the dim edge indicator opens Dock Panel to jump to another quick app (keeping YouTube!)
                 swipeTriggered = true
                 vibrateLight(14L)
                 openDockPanel()
+                if (DockPrefs.isNoLiftLaunchEnabled(this)) {
+                    continuousDockTracking = true
+                }
             } else {
                 dragMode = true
+                handleDragInProgress = true
                 vibrateLight(18L)
                 handleVisual?.alpha = 0.92f
             }
@@ -395,8 +628,12 @@ class EdgeOverlayService : Service() {
                     downRawY = ev.rawY
                     startY = handleParams?.y ?: 0
                     dragMode = false
+                    handleDragInProgress = false
                     swipeTriggered = false
-                    // Capture YouTube's live taskId & package RIGHT ON TOUCH before any overlay appears!
+                    continuousDockTracking = false
+                    pendingDiagAction = 0
+                    lastDiagArmed = false
+                    // Capture underlying foreground app RIGHT ON TOUCH before any overlay appears
                     if (!DockSessionTracker.isSessionActive()) {
                         AppLauncherEngine.captureUnderlyingAppSnapshot(this)
                     }
@@ -422,18 +659,74 @@ class EdgeOverlayService : Service() {
                         mainHandler.removeCallbacks(longPressRunnable)
                     }
 
-                    // Swipe-only trigger for opening Dock (avoids accidental edge taps):
-                    // - Idle: swipe inward >= 14dp to open Dock Panel
-                    // - Active (showing X): swipe inward or tap X to return to previous app
+                    // Active continuous 1-swipe No-Lift tracking over open Dock panel
+                    if (continuousDockTracking) {
+                        updateContinuousDockHover(ev.rawX, ev.rawY)
+                        return@setOnTouchListener true
+                    }
+
                     val inwardDx = if (rightSide) -dx else dx
-                    val swipeThreshold = if (DockSessionTracker.isSessionActive()) dp(12f) else dp(14f)
-                    if (!swipeTriggered && inwardDx > swipeThreshold && inwardDx > abs(dy) * 1.15f) {
-                        swipeTriggered = true
-                        vibrateLight(8L)
-                        if (DockSessionTracker.isSessionActive()) {
+                    val activeSession = DockSessionTracker.isSessionActive()
+
+                    if (activeSession) {
+                        if (!swipeTriggered && inwardDx > dp(12f) && inwardDx > abs(dy) * 1.15f) {
+                            swipeTriggered = true
+                            vibrateLight(8L)
                             AppLauncherEngine.dismissActiveDockApp(this)
-                        } else {
-                            openDockPanel()
+                        }
+                        return@setOnTouchListener true
+                    }
+
+                    // Active diagonal gesture preview (cancelable by sliding back to edge)
+                    if (pendingDiagAction != 0) {
+                        if (inwardDx < dp(10f)) {
+                            pendingDiagAction = 0
+                            lastDiagArmed = false
+                            hideGestureHint()
+                            return@setOnTouchListener true
+                        }
+                        val nextAction = when {
+                            dy < -dp(14f) -> 1
+                            dy > dp(14f) -> 2
+                            else -> pendingDiagAction
+                        }
+                        if (nextAction != pendingDiagAction) {
+                            pendingDiagAction = nextAction
+                            vibrateLight(6L)
+                        }
+                        val dist = hypot(inwardDx.toDouble(), dy.toDouble())
+                        val armed = dist >= dp(26f)
+                        if (armed && !lastDiagArmed) vibrateLight(6L)
+                        lastDiagArmed = armed
+                        showGestureHint(pendingDiagAction, armed, ev.rawY.toInt())
+                        return@setOnTouchListener true
+                    }
+
+                    // Initial direction commit once user swipes inward >= 14dp
+                    if (!swipeTriggered && inwardDx >= dp(14f)) {
+                        val slope = dy / inwardDx.coerceAtLeast(1f)
+                        val diagEnabled = DockPrefs.isDiagonalGesturesEnabled(this)
+                        when {
+                            diagEnabled && slope <= -0.58f -> {
+                                pendingDiagAction = 1
+                                lastDiagArmed = false
+                                vibrateLight(7L)
+                                showGestureHint(1, false, ev.rawY.toInt())
+                            }
+                            diagEnabled && slope >= 0.58f -> {
+                                pendingDiagAction = 2
+                                lastDiagArmed = false
+                                vibrateLight(7L)
+                                showGestureHint(2, false, ev.rawY.toInt())
+                            }
+                            abs(slope) < 0.85f -> {
+                                swipeTriggered = true
+                                vibrateLight(8L)
+                                openDockPanel()
+                                if (DockPrefs.isNoLiftLaunchEnabled(this)) {
+                                    continuousDockTracking = true
+                                }
+                            }
                         }
                     }
                     true
@@ -442,7 +735,17 @@ class EdgeOverlayService : Service() {
                     mainHandler.removeCallbacks(longPressRunnable)
                     if (dragMode) {
                         dragMode = false
+                        handleDragInProgress = false
                         updateHandleAppearance()
+                    }
+                    if (continuousDockTracking) {
+                        continuousDockTracking = false
+                        clearContinuousDockHover()
+                    }
+                    if (pendingDiagAction != 0) {
+                        pendingDiagAction = 0
+                        lastDiagArmed = false
+                        hideGestureHint()
                     }
                     true
                 }
@@ -450,6 +753,7 @@ class EdgeOverlayService : Service() {
                     mainHandler.removeCallbacks(longPressRunnable)
                     if (dragMode) {
                         dragMode = false
+                        handleDragInProgress = false
                         val p = handleParams
                         if (p != null) {
                             val usable = (screenHeightPx() - p.height).coerceAtLeast(1)
@@ -457,6 +761,31 @@ class EdgeOverlayService : Service() {
                             DockPrefs.setHandleYPct(this, pct)
                         }
                         updateHandleAppearance()
+                        return@setOnTouchListener true
+                    }
+
+                    if (continuousDockTracking) {
+                        continuousDockTracking = false
+                        finishContinuousDockGesture()
+                        return@setOnTouchListener true
+                    }
+
+                    if (pendingDiagAction != 0) {
+                        val action = pendingDiagAction
+                        val inwardDx = if (rightSide) -(ev.rawX - downRawX) else (ev.rawX - downRawX)
+                        val dy = ev.rawY - downRawY
+                        val dist = hypot(inwardDx.toDouble(), dy.toDouble())
+                        pendingDiagAction = 0
+                        lastDiagArmed = false
+                        hideGestureHint()
+                        if (inwardDx >= dp(14f) && dist >= dp(24f)) {
+                            vibrateLight(10L)
+                            if (action == 1) {
+                                AppLauncherEngine.switchToPreviousApp(this)
+                            } else {
+                                AppLauncherEngine.openObsidianQuickCapture(this)
+                            }
+                        }
                         return@setOnTouchListener true
                     }
 
@@ -481,6 +810,9 @@ class EdgeOverlayService : Service() {
     private fun openDockPanel() {
         if (dockOpen) return
         dockOpen = true
+        dockOpenedAtMs = System.currentTimeMillis()
+        dockHitTargets.clear()
+        hoveredDockTarget = null
 
         val rightSide = DockPrefs.isRightSide(this)
         val apps = DockAppCache.getPinnedApps(this)
@@ -530,13 +862,14 @@ class EdgeOverlayService : Service() {
             val grid = GridLayout(this).apply { columnCount = cols }
 
             for (entry in apps) {
+                val isCurrent = entry.packageName == activePkg
+                val cellNormalBg = if (isCurrent) Color.parseColor("#253349") else Color.TRANSPARENT
                 val cell = LinearLayout(this).apply {
                     orientation = LinearLayout.VERTICAL
                     gravity = Gravity.CENTER_HORIZONTAL
                     setPadding(dp(7f), dp(7f), dp(7f), dp(7f))
-                    val isCurrent = entry.packageName == activePkg
                     background = GradientDrawable().apply {
-                        setColor(if (isCurrent) Color.parseColor("#253349") else Color.TRANSPARENT)
+                        setColor(cellNormalBg)
                         cornerRadius = dp(12f).toFloat()
                     }
                 }
@@ -568,13 +901,25 @@ class EdgeOverlayService : Service() {
                 }
                 cell.addView(label, LinearLayout.LayoutParams(dp(64f), LinearLayout.LayoutParams.WRAP_CONTENT))
 
-                cell.setOnClickListener {
-                    vibrateLight(8L)
+                val invokeLaunch: () -> Unit = {
                     // Launch FIRST while focused overlay window is still attached (Android 14 BAL exemption!)
                     dockBackdrop?.alpha = 0f
                     AppLauncherEngine.launchDockApp(this@EdgeOverlayService, entry)
                     mainHandler.postDelayed({ closeDockPanel() }, 80L)
                 }
+                cell.setOnClickListener {
+                    vibrateLight(8L)
+                    invokeLaunch()
+                }
+                dockHitTargets.add(
+                    DockHitTarget(
+                        view = cell,
+                        normalBgColor = cellNormalBg,
+                        normalCornerDp = 12f,
+                        labelView = label,
+                        onInvoke = invokeLaunch
+                    )
+                )
 
                 val glp = GridLayout.LayoutParams().apply {
                     setMargins(dp(2f), dp(2f), dp(2f), dp(2f))
@@ -610,9 +955,15 @@ class EdgeOverlayService : Service() {
         }
 
         if (DockSessionTracker.isSessionActive()) {
+            val closeNormalBg = Color.parseColor("#21344B")
+            val invokeDismiss: () -> Unit = {
+                dockBackdrop?.alpha = 0f
+                AppLauncherEngine.dismissActiveDockApp(this@EdgeOverlayService)
+                mainHandler.postDelayed({ closeDockPanel() }, 80L)
+            }
             val closeBtn = FrameLayout(this).apply {
                 background = GradientDrawable().apply {
-                    setColor(Color.parseColor("#21344B"))
+                    setColor(closeNormalBg)
                     cornerRadius = dp(9f).toFloat()
                 }
                 addView(
@@ -621,13 +972,40 @@ class EdgeOverlayService : Service() {
                 )
                 setOnClickListener {
                     vibrateLight(10L)
-                    dockBackdrop?.alpha = 0f
-                    AppLauncherEngine.dismissActiveDockApp(this@EdgeOverlayService)
-                    mainHandler.postDelayed({ closeDockPanel() }, 80L)
+                    invokeDismiss()
                 }
             }
+            dockHitTargets.add(DockHitTarget(closeBtn, closeNormalBg, 9f, null, invokeDismiss))
             footer.addView(
                 closeBtn,
+                LinearLayout.LayoutParams(dp(34f), dp(30f)).apply { marginEnd = dp(6f) }
+            )
+        }
+
+        if (AppLauncherEngine.isObsidianQuickInstalled(this)) {
+            val noteNormalBg = Color.parseColor("#1A2D42")
+            val invokeQuickNote: () -> Unit = {
+                dockBackdrop?.alpha = 0f
+                AppLauncherEngine.openObsidianQuickCapture(this@EdgeOverlayService)
+                mainHandler.postDelayed({ closeDockPanel() }, 80L)
+            }
+            val quickNoteBtn = FrameLayout(this).apply {
+                background = GradientDrawable().apply {
+                    setColor(noteNormalBg)
+                    cornerRadius = dp(9f).toFloat()
+                }
+                addView(
+                    makeFlatIcon(R.drawable.ic_flat_plus, 15f, "#38BDF8"),
+                    FrameLayout.LayoutParams(dp(15f), dp(15f)).apply { gravity = Gravity.CENTER }
+                )
+                setOnClickListener {
+                    vibrateLight(8L)
+                    invokeQuickNote()
+                }
+            }
+            dockHitTargets.add(DockHitTarget(quickNoteBtn, noteNormalBg, 9f, null, invokeQuickNote))
+            footer.addView(
+                quickNoteBtn,
                 LinearLayout.LayoutParams(dp(34f), dp(30f)).apply { marginEnd = dp(6f) }
             )
         }
@@ -684,6 +1062,8 @@ class EdgeOverlayService : Service() {
     }
 
     private fun closeDockPanel() {
+        dockHitTargets.clear()
+        hoveredDockTarget = null
         val bd = dockBackdrop ?: return
         dockBackdrop = null
         dockOpen = false

@@ -4,6 +4,7 @@ import android.accessibilityservice.AccessibilityService
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Rect
 import android.provider.Settings
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityWindowInfo
@@ -34,15 +35,23 @@ class EdgeDockAccessibilityService : AccessibilityService() {
     private var cachedLauncherPkgs: Set<String> = emptySet()
     private var cachedImePkgs: Set<String> = emptySet()
     private var lastCacheAt: Long = 0L
+    private var lastReportedImeTopPx: Int = -1
+    private var lastReportedAppPkg: String = ""
 
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
         refreshSystemPackageCaches()
-        detectTopAppPackageNow()?.let { pkg ->
-            DockSessionTracker.currentForegroundPackage = pkg
-            DockAppCache.warmLaunchIntentAsync(this, pkg)
+        val topPkg = detectTopAppPackageNow()
+        if (!topPkg.isNullOrBlank()) {
+            val isLauncher = topPkg in cachedLauncherPkgs
+            DockSessionTracker.onForegroundPackageChanged(topPkg, isLauncher)
+            if (!isLauncher) DockAppCache.warmLaunchIntentAsync(this, topPkg)
+            lastReportedAppPkg = topPkg
         }
+        val imeTop = detectImeTopPx()
+        lastReportedImeTopPx = imeTop
+        EdgeOverlayService.onContextStateChanged(topPkg, imeTop)
     }
 
     override fun onDestroy() {
@@ -60,19 +69,57 @@ class EdgeDockAccessibilityService : AccessibilityService() {
             refreshSystemPackageCaches()
         }
 
+        // 1. Track soft keyboard (IME) vertical top coordinate for zero-polling handle avoidance
+        val imeTop = detectImeTopPx()
+        var ctxDirty = false
+        if (imeTop != lastReportedImeTopPx) {
+            lastReportedImeTopPx = imeTop
+            ctxDirty = true
+        }
+
+        // 2. Track active foreground application package
         val eventPkg = event.packageName?.toString()?.trim().orEmpty()
         val pkg = if (eventPkg.isNotEmpty() && !shouldIgnoreTransientPackage(eventPkg)) {
             eventPkg
         } else {
             detectTopAppPackageNow().orEmpty()
         }
-        if (pkg.isEmpty() || shouldIgnoreTransientPackage(pkg)) return
-
-        val isLauncher = pkg in cachedLauncherPkgs
-        if (!isLauncher) {
-            DockAppCache.warmLaunchIntentAsync(this, pkg)
+        if (pkg.isNotEmpty() && !shouldIgnoreTransientPackage(pkg)) {
+            val isLauncher = pkg in cachedLauncherPkgs
+            if (!isLauncher) {
+                DockAppCache.warmLaunchIntentAsync(this, pkg)
+            }
+            DockSessionTracker.onForegroundPackageChanged(pkg, isLauncher)
+            if (pkg != lastReportedAppPkg) {
+                lastReportedAppPkg = pkg
+                ctxDirty = true
+            }
         }
-        DockSessionTracker.onForegroundPackageChanged(pkg, isLauncher)
+
+        if (ctxDirty) {
+            EdgeOverlayService.onContextStateChanged(
+                lastReportedAppPkg.ifEmpty { null },
+                lastReportedImeTopPx.coerceAtLeast(0)
+            )
+        }
+    }
+
+    fun detectImeTopPx(): Int {
+        return try {
+            val winList = windows ?: return 0
+            val rect = Rect()
+            for (w in winList) {
+                if (w.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD) {
+                    w.getBoundsInScreen(rect)
+                    if (rect.height() > 120 && rect.top > 0) {
+                        return rect.top
+                    }
+                }
+            }
+            0
+        } catch (_: Throwable) {
+            0
+        }
     }
 
     /**
@@ -160,6 +207,14 @@ class EdgeDockAccessibilityService : AccessibilityService() {
     fun goBack(): Boolean {
         return try {
             performGlobalAction(GLOBAL_ACTION_BACK)
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    fun openRecents(): Boolean {
+        return try {
+            performGlobalAction(GLOBAL_ACTION_RECENTS)
         } catch (_: Throwable) {
             false
         }

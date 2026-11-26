@@ -2,12 +2,70 @@ package com.nguyenhieu.edgedock
 
 import android.app.ActivityOptions
 import android.app.PendingIntent
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.widget.Toast
 
 object AppLauncherEngine {
+
+    const val OBSIDIAN_QUICK_PKG = "com.nguyenhieu.quicknotes"
+    private const val OBSIDIAN_WIDGET_ACTION_CLS = "com.nguyenhieu.quicknotes.WidgetActionActivity"
+
+    fun isObsidianQuickInstalled(context: Context): Boolean {
+        return try {
+            context.packageManager.getPackageInfo(OBSIDIAN_QUICK_PKG, 0)
+            true
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    /**
+     * Pops up Obsidian Quick's translucent floating Quick Add Note sheet directly over
+     * any running app (no app switch, no Recents entry, auto-returns on save/outside tap).
+     */
+    fun openObsidianQuickCapture(context: Context): Boolean {
+        if (!isObsidianQuickInstalled(context)) {
+            Toast.makeText(context, "Chưa cài Obsidian Quick", Toast.LENGTH_SHORT).show()
+            return false
+        }
+        val intent = Intent().apply {
+            component = ComponentName(OBSIDIAN_QUICK_PKG, OBSIDIAN_WIDGET_ACTION_CLS)
+            putExtra("extra_widget_id", -1)
+            putExtra("extra_widget_kind", "notes")
+            putExtra("extra_mode", "add_note")
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                Intent.FLAG_ACTIVITY_NO_ANIMATION
+        }
+        val ok = startIntentSafely(context, intent)
+        if (!ok) {
+            Toast.makeText(context, "Không thể mở Ghi nhanh", Toast.LENGTH_SHORT).show()
+        }
+        return ok
+    }
+
+    /**
+     * Instant one-thumb Alt-Tab to the previously used app.
+     */
+    fun switchToPreviousApp(context: Context): Boolean {
+        val acc = EdgeDockAccessibilityService.instance
+        val liveTop = acc?.detectTopAppPackageNow() ?: DockSessionTracker.currentForegroundPackage
+        val isHome = liveTop != null && (liveTop in DockAppCache.getHomePackages(context))
+        val targetPkg = DockSessionTracker.getPreviousAppSwitchTarget(liveTop, isHome)
+        if (!targetPkg.isNullOrBlank() && targetPkg != context.packageName) {
+            if (bringPackageToFront(context, targetPkg)) {
+                return true
+            }
+        }
+        if (acc != null && acc.openRecents()) {
+            return true
+        }
+        Toast.makeText(context, "Chưa có app trước đó (bật Accessibility)", Toast.LENGTH_SHORT).show()
+        return false
+    }
 
     /**
      * Captures the exact foreground app (e.g. YouTube) immediately on Edge touch

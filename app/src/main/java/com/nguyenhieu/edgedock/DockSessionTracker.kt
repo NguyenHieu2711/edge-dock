@@ -15,6 +15,12 @@ object DockSessionTracker {
     var currentForegroundPackage: String? = null
 
     @Volatile
+    var recentAppCurrent: String? = null
+
+    @Volatile
+    var recentAppPrevious: String? = null
+
+    @Volatile
     var snapshotUnderlyingPackage: String? = null
 
     @Volatile
@@ -120,8 +126,23 @@ object DockSessionTracker {
         if (hadSession) notifyStateChanged()
     }
 
+    fun getPreviousAppSwitchTarget(liveTopPkg: String?, isLiveHome: Boolean): String? {
+        val cur = recentAppCurrent
+        val prev = recentAppPrevious
+        if (isLiveHome || liveTopPkg.isNullOrBlank()) {
+            return cur ?: prev
+        }
+        return if (liveTopPkg == cur) prev else cur
+    }
+
     fun onForegroundPackageChanged(pkg: String, isLauncher: Boolean) {
         currentForegroundPackage = pkg
+        if (!isLauncher && pkg.isNotBlank() && pkg != recentAppCurrent) {
+            if (!recentAppCurrent.isNullOrBlank()) {
+                recentAppPrevious = recentAppCurrent
+            }
+            recentAppCurrent = pkg
+        }
         val active = activeDockPackage ?: return
         if (pkg == active) {
             dockAppSeenOnScreen = true

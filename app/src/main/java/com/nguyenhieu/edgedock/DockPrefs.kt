@@ -19,6 +19,11 @@ object DockPrefs {
     private const val KEY_HANDLE_HEIGHT_DP = "handle_height_dp"
     private const val KEY_HIDE_RECENTS = "hide_from_recents"
     private const val KEY_APPS_JSON = "dock_apps_json"
+    private const val KEY_NO_LIFT_LAUNCH = "no_lift_launch"
+    private const val KEY_DIAGONAL_GESTURES = "diagonal_gestures"
+    private const val KEY_AUTO_HIDE_LANDSCAPE = "auto_hide_landscape"
+    private const val KEY_AVOID_KEYBOARD = "avoid_keyboard"
+    private const val KEY_EXCLUDED_PKGS_JSON = "excluded_pkgs_json"
 
     private fun prefs(ctx: Context) = ctx.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
 
@@ -45,6 +50,54 @@ object DockPrefs {
     fun isHideFromRecents(ctx: Context): Boolean = prefs(ctx).getBoolean(KEY_HIDE_RECENTS, false)
     fun setHideFromRecents(ctx: Context, hide: Boolean) =
         prefs(ctx).edit().putBoolean(KEY_HIDE_RECENTS, hide).apply()
+
+    fun isNoLiftLaunchEnabled(ctx: Context): Boolean = prefs(ctx).getBoolean(KEY_NO_LIFT_LAUNCH, true)
+    fun setNoLiftLaunchEnabled(ctx: Context, enabled: Boolean) =
+        prefs(ctx).edit().putBoolean(KEY_NO_LIFT_LAUNCH, enabled).apply()
+
+    fun isDiagonalGesturesEnabled(ctx: Context): Boolean = prefs(ctx).getBoolean(KEY_DIAGONAL_GESTURES, true)
+    fun setDiagonalGesturesEnabled(ctx: Context, enabled: Boolean) =
+        prefs(ctx).edit().putBoolean(KEY_DIAGONAL_GESTURES, enabled).apply()
+
+    fun isAutoHideLandscape(ctx: Context): Boolean = prefs(ctx).getBoolean(KEY_AUTO_HIDE_LANDSCAPE, true)
+    fun setAutoHideLandscape(ctx: Context, enabled: Boolean) =
+        prefs(ctx).edit().putBoolean(KEY_AUTO_HIDE_LANDSCAPE, enabled).apply()
+
+    fun isAvoidKeyboard(ctx: Context): Boolean = prefs(ctx).getBoolean(KEY_AVOID_KEYBOARD, true)
+    fun setAvoidKeyboard(ctx: Context, enabled: Boolean) =
+        prefs(ctx).edit().putBoolean(KEY_AVOID_KEYBOARD, enabled).apply()
+
+    @Volatile
+    private var cachedExcludedPkgs: Set<String>? = null
+
+    fun getExcludedPackages(ctx: Context): Set<String> {
+        cachedExcludedPkgs?.let { return it }
+        val raw = prefs(ctx).getString(KEY_EXCLUDED_PKGS_JSON, "[]") ?: "[]"
+        val out = LinkedHashSet<String>()
+        try {
+            val arr = JSONArray(raw)
+            for (i in 0 until arr.length()) {
+                val p = arr.optString(i, "").trim()
+                if (p.isNotEmpty()) out.add(p)
+            }
+        } catch (_: Exception) {
+        }
+        cachedExcludedPkgs = out
+        return out
+    }
+
+    fun setExcludedPackages(ctx: Context, pkgs: Set<String>) {
+        val clean = pkgs.map { it.trim() }.filter { it.isNotEmpty() }.toSet()
+        val arr = JSONArray()
+        for (p in clean) arr.put(p)
+        cachedExcludedPkgs = clean
+        prefs(ctx).edit().putString(KEY_EXCLUDED_PKGS_JSON, arr.toString()).apply()
+    }
+
+    fun isPackageExcluded(ctx: Context, pkg: String): Boolean {
+        if (pkg.isBlank()) return false
+        return pkg in getExcludedPackages(ctx)
+    }
 
     fun loadApps(ctx: Context): MutableList<DockAppEntry> {
         val raw = prefs(ctx).getString(KEY_APPS_JSON, "[]") ?: "[]"
