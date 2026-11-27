@@ -825,56 +825,50 @@ class EdgeOverlayService : Service() {
 
         val card = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
             background = GradientDrawable().apply {
-                setColor(Color.parseColor("#F5181C25"))
+                setColor(Color.parseColor("#F2181C25"))
                 setStroke(dp(1f).coerceAtLeast(1), Color.parseColor("#2F384A"))
-                cornerRadius = dp(18f).toFloat()
+                cornerRadius = dp(14f).toFloat()
             }
-            setPadding(dp(10f), dp(12f), dp(10f), dp(10f))
+            setPadding(dp(5f), dp(6f), dp(5f), dp(6f))
             elevation = dp(10f).toFloat()
             isClickable = true
         }
 
         if (apps.isEmpty()) {
-            val emptyRow = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER
-                setPadding(dp(14f), dp(18f), dp(14f), dp(18f))
+            val emptyBtn = FrameLayout(this).apply {
+                background = GradientDrawable().apply {
+                    setColor(Color.parseColor("#1A2D42"))
+                    cornerRadius = dp(11f).toFloat()
+                }
+                addView(
+                    makeFlatIcon(R.drawable.ic_flat_plus, 18f, "#38BDF8"),
+                    FrameLayout.LayoutParams(dp(18f), dp(18f)).apply { gravity = Gravity.CENTER }
+                )
                 setOnClickListener {
+                    vibrateLight(8L)
                     closeDockPanel()
                     openSettingsActivity()
                 }
             }
-            emptyRow.addView(makeFlatIcon(R.drawable.ic_flat_plus, 15f, "#38BDF8"))
-            emptyRow.addView(
-                TextView(this).apply {
-                    text = "Chọn app"
-                    setTextColor(Color.parseColor("#38BDF8"))
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-                    typeface = Typeface.DEFAULT_BOLD
-                    setPadding(dp(6f), 0, 0, 0)
-                }
-            )
-            card.addView(emptyRow)
+            card.addView(emptyBtn, LinearLayout.LayoutParams(dp(44f), dp(44f)))
         } else {
-            val cols = if (apps.size > 5) 2 else 1
+            val cols = if (apps.size > 6) 2 else 1
             val scroll = ScrollView(this).apply { isVerticalScrollBarEnabled = false }
             val grid = GridLayout(this).apply { columnCount = cols }
 
             for (entry in apps) {
                 val isCurrent = entry.packageName == activePkg
                 val cellNormalBg = if (isCurrent) Color.parseColor("#253349") else Color.TRANSPARENT
-                val cell = LinearLayout(this).apply {
-                    orientation = LinearLayout.VERTICAL
-                    gravity = Gravity.CENTER_HORIZONTAL
-                    setPadding(dp(7f), dp(7f), dp(7f), dp(7f))
+                val cell = FrameLayout(this).apply {
+                    setPadding(dp(5f), dp(5f), dp(5f), dp(5f))
                     background = GradientDrawable().apply {
                         setColor(cellNormalBg)
-                        cornerRadius = dp(12f).toFloat()
+                        cornerRadius = dp(11f).toFloat()
                     }
                 }
 
-                val iconWrap = FrameLayout(this)
                 val iconView = ImageView(this).apply {
                     scaleType = ImageView.ScaleType.FIT_CENTER
                     val cached = DockAppCache.getCachedIcon(entry.packageName)
@@ -887,19 +881,10 @@ class EdgeOverlayService : Service() {
                         }
                     }
                 }
-                iconWrap.addView(iconView, FrameLayout.LayoutParams(dp(42f), dp(42f)))
-                cell.addView(iconWrap, LinearLayout.LayoutParams(dp(44f), dp(44f)))
-
-                val label = TextView(this).apply {
-                    text = entry.label
-                    setTextColor(Color.parseColor("#E2E8F0"))
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 10.8f)
-                    maxLines = 1
-                    ellipsize = TextUtils.TruncateAt.END
-                    gravity = Gravity.CENTER
-                    setPadding(0, dp(4f), 0, 0)
-                }
-                cell.addView(label, LinearLayout.LayoutParams(dp(64f), LinearLayout.LayoutParams.WRAP_CONTENT))
+                cell.addView(
+                    iconView,
+                    FrameLayout.LayoutParams(dp(38f), dp(38f)).apply { gravity = Gravity.CENTER }
+                )
 
                 val invokeLaunch: () -> Unit = {
                     // Launch FIRST while focused overlay window is still attached (Android 14 BAL exemption!)
@@ -911,18 +896,26 @@ class EdgeOverlayService : Service() {
                     vibrateLight(8L)
                     invokeLaunch()
                 }
+                // Long-press any icon to open dock settings without cluttering the dock with a gear button
+                cell.setOnLongClickListener {
+                    vibrateLight(14L)
+                    dockBackdrop?.alpha = 0f
+                    openSettingsActivity()
+                    mainHandler.postDelayed({ closeDockPanel() }, 80L)
+                    true
+                }
                 dockHitTargets.add(
                     DockHitTarget(
                         view = cell,
                         normalBgColor = cellNormalBg,
-                        normalCornerDp = 12f,
-                        labelView = label,
+                        normalCornerDp = 11f,
+                        labelView = null,
                         onInvoke = invokeLaunch
                     )
                 )
 
                 val glp = GridLayout.LayoutParams().apply {
-                    setMargins(dp(2f), dp(2f), dp(2f), dp(2f))
+                    setMargins(dp(1f), dp(2f), dp(1f), dp(2f))
                 }
                 grid.addView(cell, glp)
             }
@@ -935,25 +928,12 @@ class EdgeOverlayService : Service() {
                     LinearLayout.LayoutParams.WRAP_CONTENT,
                     LinearLayout.LayoutParams.WRAP_CONTENT
                 ).apply {
-                    if (apps.size > 6) height = maxScrollH
+                    if (apps.size > 7) height = maxScrollH
                 }
             )
         }
 
-        val divider = View(this).apply { setBackgroundColor(Color.parseColor("#2A3142")) }
-        card.addView(
-            divider,
-            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(1f).coerceAtLeast(1)).apply {
-                topMargin = dp(8f)
-                bottomMargin = dp(6f)
-            }
-        )
-
-        val footer = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-        }
-
+        // Only show a slim dismiss button while a dock overlay session is active (no permanent + or settings footer)
         if (DockSessionTracker.isSessionActive()) {
             val closeNormalBg = Color.parseColor("#21344B")
             val invokeDismiss: () -> Unit = {
@@ -967,8 +947,8 @@ class EdgeOverlayService : Service() {
                     cornerRadius = dp(9f).toFloat()
                 }
                 addView(
-                    makeFlatIcon(R.drawable.ic_flat_close, 15f, "#38BDF8"),
-                    FrameLayout.LayoutParams(dp(15f), dp(15f)).apply { gravity = Gravity.CENTER }
+                    makeFlatIcon(R.drawable.ic_flat_close, 14f, "#38BDF8"),
+                    FrameLayout.LayoutParams(dp(14f), dp(14f)).apply { gravity = Gravity.CENTER }
                 )
                 setOnClickListener {
                     vibrateLight(10L)
@@ -976,66 +956,19 @@ class EdgeOverlayService : Service() {
                 }
             }
             dockHitTargets.add(DockHitTarget(closeBtn, closeNormalBg, 9f, null, invokeDismiss))
-            footer.addView(
+            card.addView(
                 closeBtn,
-                LinearLayout.LayoutParams(dp(34f), dp(30f)).apply { marginEnd = dp(6f) }
+                LinearLayout.LayoutParams(dp(42f), dp(28f)).apply { topMargin = dp(4f) }
             )
         }
-
-        if (AppLauncherEngine.isObsidianQuickInstalled(this)) {
-            val noteNormalBg = Color.parseColor("#1A2D42")
-            val invokeQuickNote: () -> Unit = {
-                dockBackdrop?.alpha = 0f
-                AppLauncherEngine.openObsidianQuickCapture(this@EdgeOverlayService)
-                mainHandler.postDelayed({ closeDockPanel() }, 80L)
-            }
-            val quickNoteBtn = FrameLayout(this).apply {
-                background = GradientDrawable().apply {
-                    setColor(noteNormalBg)
-                    cornerRadius = dp(9f).toFloat()
-                }
-                addView(
-                    makeFlatIcon(R.drawable.ic_flat_plus, 15f, "#38BDF8"),
-                    FrameLayout.LayoutParams(dp(15f), dp(15f)).apply { gravity = Gravity.CENTER }
-                )
-                setOnClickListener {
-                    vibrateLight(8L)
-                    invokeQuickNote()
-                }
-            }
-            dockHitTargets.add(DockHitTarget(quickNoteBtn, noteNormalBg, 9f, null, invokeQuickNote))
-            footer.addView(
-                quickNoteBtn,
-                LinearLayout.LayoutParams(dp(34f), dp(30f)).apply { marginEnd = dp(6f) }
-            )
-        }
-
-        val settingsBtn = FrameLayout(this).apply {
-            background = GradientDrawable().apply {
-                setColor(Color.parseColor("#222836"))
-                cornerRadius = dp(9f).toFloat()
-            }
-            addView(
-                makeFlatIcon(R.drawable.ic_flat_settings, 15f, "#94A3B8"),
-                FrameLayout.LayoutParams(dp(15f), dp(15f)).apply { gravity = Gravity.CENTER }
-            )
-            setOnClickListener {
-                vibrateLight(8L)
-                dockBackdrop?.alpha = 0f
-                openSettingsActivity()
-                mainHandler.postDelayed({ closeDockPanel() }, 80L)
-            }
-        }
-        footer.addView(settingsBtn, LinearLayout.LayoutParams(dp(34f), dp(30f)))
-        card.addView(footer, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
 
         val cardLp = FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.WRAP_CONTENT,
             FrameLayout.LayoutParams.WRAP_CONTENT
         ).apply {
             gravity = (if (rightSide) Gravity.END else Gravity.START) or Gravity.CENTER_VERTICAL
-            marginEnd = if (rightSide) dp(10f) else 0
-            marginStart = if (rightSide) 0 else dp(10f)
+            marginEnd = if (rightSide) dp(8f) else 0
+            marginStart = if (rightSide) 0 else dp(8f)
         }
         backdrop.addView(card, cardLp)
 
